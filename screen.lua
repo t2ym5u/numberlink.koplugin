@@ -23,7 +23,7 @@ local Size            = require("ui/size")
 local UIManager       = require("ui/uimanager")
 local VerticalGroup   = require("ui/widget/verticalgroup")
 local VerticalSpan    = require("ui/widget/verticalspan")
-local _               = require("gettext")
+local _               = require("i18n")
 local T               = require("ffi/util").template
 
 local ScreenBase             = lrequire_common("screen_base")
@@ -46,7 +46,7 @@ Rules:
 • Paths cannot cross or share cells with one another.
 • Every cell in the grid must be covered by exactly one path.
 
-Tap a numbered cell to start a path, then tap adjacent cells to extend it.
+Tap a numbered cell to start a path, then tap adjacent cells to extend it. Hold on a path cell to clear that color's path.
 ]])
 
 local GAME_RULES_FR = [[
@@ -60,7 +60,7 @@ Règles :
 • Les chemins ne peuvent pas se croiser ni partager des cases.
 • Chaque case de la grille doit être couverte par exactement un chemin.
 
-Appuyez sur une case numérotée pour commencer un chemin, puis appuyez sur les cases adjacentes pour l'étendre.
+Appuyez sur une case numérotée pour commencer un chemin, puis appuyez sur les cases adjacentes pour l'étendre. Restez appuyé sur une case du chemin pour effacer ce chemin.
 ]]
 
 local NumberlinkScreen = ScreenBase:extend{}
@@ -132,7 +132,6 @@ function NumberlinkScreen:buildLayout()
                 { text = _("Check"), callback = function() self:onCheck() end },
                 { id = "undo_button", text = _("Undo"),
                   callback = function() self:onUndo() end },
-                { text = _("Rules"), callback = function() self:showRulesHint() end },
             },
         },
     }
@@ -155,18 +154,13 @@ function NumberlinkScreen:buildLayout()
             right_panel,
         }
     else
-        self.layout = VerticalGroup:new{
+        local content = VerticalGroup:new{
             align = "center",
-            VerticalSpan:new{ width = Size.span.vertical_large },
-            top_buttons,
-            VerticalSpan:new{ width = Size.span.vertical_large },
             board_frame,
             VerticalSpan:new{ width = Size.span.vertical_large },
             self.status_text,
-            VerticalSpan:new{ width = Size.span.vertical_large },
-            bottom_buttons,
-            VerticalSpan:new{ width = Size.span.vertical_large },
         }
+        self:buildPortraitLayout(top_buttons, content, bottom_buttons)
     end
     self[1] = self.layout
     self:updateStatus()
@@ -235,18 +229,6 @@ function NumberlinkScreen:toggleSolution()
         self.reveal_button:setText(self:getRevealButtonText(), self.reveal_button.width)
     end
     self:updateStatus()
-end
-
-function NumberlinkScreen:showRulesHint()
-    self:showMessage(_(
-        "Numberlink rules:\n" ..
-        "Connect each pair of matching numbers with a path.\n" ..
-        "Paths may not cross or share cells.\n" ..
-        "Every cell must be covered by exactly one path.\n\n" ..
-        "Tap a number: select as path start\n" ..
-        "Tap adjacent cell: extend active path\n" ..
-        "Hold on path: clear that color's path"
-    ), 10)
 end
 
 function NumberlinkScreen:openGridMenu()
