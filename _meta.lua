@@ -3,5 +3,5 @@ return {
     name        = "numberlink",
     fullname    = _("Numberlink"),
     description = _("Connect each pair of matching numbers with a path covering every cell."),
-    version     = "1.1.1",
+    version     = "1.1.2",
 }
