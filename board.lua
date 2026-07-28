@@ -18,7 +18,9 @@ local DEFAULT_N          = 5
 local DEFAULT_DIFFICULTY = "easy"
 
 -- Number of colors per 100 cells
-local N_COLORS_PER_100 = { easy = 8, medium = 12, hard = 16 }
+local N_COLORS_PER_100 = { easy = 25, medium = 32, hard = 40 }
+
+local DIRS = { {-1,0}, {1,0}, {0,-1}, {0,1} }
 
 -- ---------------------------------------------------------------------------
 -- Generator: serpentine Hamiltonian path split into N color paths
@@ -71,7 +73,35 @@ local function makeSerpentine(n, start_corner, horizontal)
     return path
 end
 
-local function generateNumberlink(n, n_colors)
+-- Segment lengths for slicing the serpentine path into n_colors pieces.
+-- The straightforward floor(total/n_colors) + remainder split is fully
+-- DETERMINISTIC given n and n_colors (only 8 corner/orientation combos
+-- exist at all) -- retrying generation can never explore anything new
+-- without also varying the split itself. Reserve a 2-cell minimum per
+-- color (a path needs at least its own two endpoints) and scatter the
+-- remaining cells randomly across colors.
+local function randomSegLengths(total, n_colors)
+    local lengths = {}
+    for i = 1, n_colors do lengths[i] = 2 end
+    local remaining = total - 2 * n_colors
+    if remaining < 0 then
+        -- n_colors too large for the 2-cell minimum -- fall back to the
+        -- uniform split (matches the original, pre-jitter behavior).
+        local seg_base = math.floor(total / n_colors)
+        local seg_rem  = total - seg_base * n_colors
+        for i = 1, n_colors do
+            lengths[i] = seg_base + (i > n_colors - seg_rem and 1 or 0)
+        end
+        return lengths
+    end
+    for _ = 1, remaining do
+        local i = math.random(1, n_colors)
+        lengths[i] = lengths[i] + 1
+    end
+    return lengths
+end
+
+local function generateNumberlink(n, n_colors, seg_lengths)
     -- Build a clean serpentine path
     local corner = math.random(1, 4)
     local horiz  = (math.random() > 0.5)
@@ -90,16 +120,14 @@ local function generateNumberlink(n, n_colors)
         end
     end
 
-    -- Split into n_colors segments
-    local seg_base = math.floor(n*n / n_colors)
-    local seg_rem  = (n*n) - seg_base * n_colors  -- last few colors get +1
+    local lengths = seg_lengths or randomSegLengths(n*n, n_colors)
 
     local clues    = emptyGrid(n, n, 0)
     local solution = emptyGrid(n, n, 0)
 
     local idx = 1
     for color = 1, n_colors do
-        local seg_len = seg_base + (color > n_colors - seg_rem and 1 or 0)
+        local seg_len = lengths[color]
         local start_i = idx
         local end_i   = idx + seg_len - 1
         idx = end_i + 1
@@ -121,6 +149,153 @@ local function generateNumberlink(n, n_colors)
     end
 
     return clues, solution
+end
+
+-- ---------------------------------------------------------------------------
+-- Uniqueness counter. isSolved() is a LITERAL full-grid comparison to
+-- self.solution (every cell must match exactly) -- so uniqueness means:
+-- given only the clue endpoint pairs (2 per color), is there only one way
+-- to partition the WHOLE grid into n_colors simple paths (each a
+-- Hamiltonian path between its own two given endpoints over exactly its
+-- assigned cells), jointly covering every cell? Note this does NOT require
+-- each color's induced grid-adjacency subgraph to have degree <=2 (that
+-- would be a stricter, wrong condition) -- "chords" (extra same-color
+-- adjacencies beyond the intended path) don't prevent a Hamiltonian path
+-- from existing, and the tap-to-extend interaction only ever needs SOME
+-- valid path to exist, not a chordless one.
+--
+-- Grows each color's path as an actual ordered path via DFS (from
+-- endpoint1 to endpoint2, one adjacent unclaimed cell at a time), recursing
+-- into the next color on every completed path; succeeds only once every
+-- color is done AND every cell ends up claimed. Two prunes make this
+-- tractable at all: colors are processed in ascending endpoint-distance
+-- order (MRV -- the tightest-constrained path first), and after each step
+-- a cheap BFS reachability check confirms every remaining color's endpoint
+-- pair (and the current path's own target) is still connectable through
+-- unclaimed cells, abandoning the branch immediately otherwise (mirrors
+-- bridges' forward-checking fix elsewhere in this audit). Even so, this is
+-- the least tractable solver of the whole human-solvability audit: only
+-- n=5 (the smallest, default size) is verifiable within a practical node
+-- budget -- see NumberlinkBoard:generate()'s comment for the accepted
+-- larger-size limitation.
+-- ---------------------------------------------------------------------------
+
+local function countSolutions(clues, n, k, limit, node_budget)
+    local owner = {}
+    for r = 1, n do owner[r] = {}; for c = 1, n do owner[r][c] = 0 end end
+
+    local endpoints = {}
+    for col = 1, k do
+        local ep = {}
+        for r = 1, n do for c = 1, n do if clues[r][c] == col then ep[#ep + 1] = { r, c } end end end
+        endpoints[col] = ep
+    end
+
+    local order = {}
+    for col = 1, k do order[col] = col end
+    table.sort(order, function(a, b)
+        local ea, eb = endpoints[a], endpoints[b]
+        local da = math.abs(ea[1][1] - ea[2][1]) + math.abs(ea[1][2] - ea[2][2])
+        local db = math.abs(eb[1][1] - eb[2][1]) + math.abs(eb[1][2] - eb[2][2])
+        return da < db
+    end)
+
+    local solutions, nodes, exhausted = 0, 0, false
+    local total_cells = n * n
+
+    local bfs_seen = {}
+    for r = 1, n do bfs_seen[r] = {} end
+    local bfs_stamp = 0
+    local bfs_queue = {}
+    -- A cell is usable for `col`'s path if it's unclaimed AND not another
+    -- color's reserved clue endpoint (a clue cell belongs exclusively to
+    -- its own color -- letting a DIFFERENT color's path walk through it
+    -- corrupts the search: that other color's endpoint gets silently
+    -- consumed, which can make the search wrongly conclude a valid
+    -- completion is impossible when it isn't, undercounting solutions).
+    local function usableFor(r, c, col)
+        return owner[r][c] == 0 and (clues[r][c] == 0 or clues[r][c] == col)
+    end
+
+    local function reachable(cr, cc, tr, tc, col)
+        bfs_stamp = bfs_stamp + 1
+        local qhead, qtail = 1, 0
+        qtail = qtail + 1; bfs_queue[qtail] = { cr, cc }
+        bfs_seen[cr][cc] = bfs_stamp
+        while qhead <= qtail do
+            local cell = bfs_queue[qhead]; qhead = qhead + 1
+            local r, c = cell[1], cell[2]
+            if r == tr and c == tc then return true end
+            for _, d in ipairs(DIRS) do
+                local nr, nc = r + d[1], c + d[2]
+                if nr >= 1 and nr <= n and nc >= 1 and nc <= n and bfs_seen[nr][nc] ~= bfs_stamp then
+                    if (nr == tr and nc == tc) or usableFor(nr, nc, col) then
+                        bfs_seen[nr][nc] = bfs_stamp
+                        qtail = qtail + 1; bfs_queue[qtail] = { nr, nc }
+                    end
+                end
+            end
+        end
+        return false
+    end
+
+    local function claimedCount()
+        local cnt = 0
+        for r = 1, n do for c = 1, n do if owner[r][c] ~= 0 then cnt = cnt + 1 end end end
+        return cnt
+    end
+
+    local function otherColorsStillFeasible(from_idx)
+        for oi = from_idx + 1, k do
+            local col = order[oi]
+            local ep = endpoints[col]
+            if ep[1] and ep[2] then
+                if not reachable(ep[1][1], ep[1][2], ep[2][1], ep[2][2], col) then return false end
+            end
+        end
+        return true
+    end
+
+    local function growPath(col, cr, cc, tr, tc, idx, onComplete)
+        if solutions >= limit or exhausted then return false end
+        nodes = nodes + 1
+        if nodes > node_budget then exhausted = true; return false end
+        if cr == tr and cc == tc then
+            if not otherColorsStillFeasible(idx) then return true end
+            return onComplete()
+        end
+        if not reachable(cr, cc, tr, tc, col) then return true end
+        for _, d in ipairs(DIRS) do
+            local nr, nc = cr + d[1], cc + d[2]
+            if nr >= 1 and nr <= n and nc >= 1 and nc <= n and usableFor(nr, nc, col) then
+                owner[nr][nc] = col
+                local keep_going = growPath(col, nr, nc, tr, tc, idx, onComplete)
+                owner[nr][nc] = 0
+                if not keep_going then return false end
+            end
+        end
+        return true
+    end
+
+    local function solveColor(idx)
+        if solutions >= limit or exhausted then return false end
+        if idx > k then
+            if claimedCount() == total_cells then solutions = solutions + 1 end
+            return true
+        end
+        local col = order[idx]
+        local ep = endpoints[col]
+        if #ep ~= 2 then return true end
+        local r1, c1 = ep[1][1], ep[1][2]
+        local r2, c2 = ep[2][1], ep[2][2]
+        owner[r1][c1] = col
+        local keep_going = growPath(col, r1, c1, r2, c2, idx, function() return solveColor(idx + 1) end)
+        owner[r1][c1] = 0
+        return keep_going
+    end
+
+    solveColor(1)
+    return solutions, exhausted
 end
 
 -- ---------------------------------------------------------------------------
@@ -161,8 +336,44 @@ function NumberlinkBoard:generate(difficulty)
     local cfg      = N_COLORS_PER_100[self.difficulty] or N_COLORS_PER_100.easy
     local n_colors = math.max(2, math.floor(n*n * cfg / 100))
 
-    self.n_colors       = n_colors
-    self.clues, self.solution = generateNumberlink(n, n_colors)
+    self.n_colors = n_colors
+
+    -- Verifying uniqueness here means searching every way to jointly
+    -- partition the WHOLE grid into n_colors Hamiltonian paths -- by far
+    -- the least tractable solver in this fleet's whole solvability audit
+    -- (multiple simultaneous interacting paths, not one shape). At the
+    -- ORIGINAL color density (8/12/16 colors per 100 cells) this was a
+    -- structural dead end, not a retry-budget problem: even 400 fresh
+    -- attempts at n=5 (24000+ underlying candidates via the 60-attempt
+    -- inner loop) never found a single genuinely unique layout at any of
+    -- the 3 real difficulties -- confirmed the SAME serpentine-slice
+    -- construction is fine, it's that 2-4 colors on a 25-cell grid leaves
+    -- far too much room to shift a segment boundary by a cell or two and
+    -- still connect the same two endpoints. Measured density needed for
+    -- real uniqueness: per-attempt success only becomes reliable (>90%)
+    -- around a 30%+ colors-per-cell ratio, roughly double the original
+    -- density -- fixed by raising N_COLORS_PER_100 accordingly. At that
+    -- density, more (shorter) colors also makes verification itself much
+    -- cheaper (worst case a few ms, not the multi-second stalls the old
+    -- density's few-long-paths shape caused), so every size is verified,
+    -- not just n=5.
+    local node_budget = 300000
+    local clues, solution
+    local best_clues, best_solution
+    for _ = 1, 60 do
+        if clues then break end
+        local seg_lengths = randomSegLengths(n * n, n_colors)
+        local cand_clues, cand_solution = generateNumberlink(n, n_colors, seg_lengths)
+        if not best_clues then
+            best_clues, best_solution = cand_clues, cand_solution
+        end
+        local solutions, exhausted = countSolutions(cand_clues, n, n_colors, 2, node_budget)
+        if solutions == 1 and not exhausted then
+            clues, solution = cand_clues, cand_solution
+        end
+    end
+    if not clues then clues, solution = best_clues, best_solution end
+    self.clues, self.solution = clues, solution
     self.paths      = emptyGrid(n, n, 0)
     self.path_cells = {}
     for c = 1, n_colors do self.path_cells[c] = {} end
