@@ -21,14 +21,14 @@ local COLORS = {
     Blitbuffer.COLOR_BLACK,
     Blitbuffer.COLOR_GRAY_4,
     Blitbuffer.COLOR_GRAY_6,
-    Blitbuffer.COLOR_GRAY_8,
-    Blitbuffer.COLOR_GRAY_A,
-    Blitbuffer.COLOR_GRAY_C,
+    Blitbuffer.COLOR_DARK_GRAY,
+    Blitbuffer.COLOR_GRAY,
+    Blitbuffer.COLOR_LIGHT_GRAY,
 }
 
 local C_BG        = Blitbuffer.COLOR_WHITE
 local C_ACTIVE    = Blitbuffer.COLOR_GRAY_E   -- active-color highlight
-local C_WRONG     = Blitbuffer.COLOR_GRAY_A
+local C_WRONG     = Blitbuffer.COLOR_GRAY
 local C_GRID      = Blitbuffer.COLOR_GRAY_6
 local C_TEXT_DARK = Blitbuffer.COLOR_BLACK
 local C_TEXT_WITE = Blitbuffer.COLOR_WHITE
