@@ -131,6 +131,52 @@ describe("NumberlinkBoard", function()
             assert.are.equal("extend", reason)
             assert.are.equal(color, b.paths[nr][nc])
         end)
+
+        it("tapping the far endpoint closes the loop between the two numbers", function()
+            local b = newBoard(5)
+            local color = 1
+            local ep1, ep2 = b:getEndpoints(color)
+            assert.is_not_nil(ep1)
+            assert.is_not_nil(ep2)
+
+            -- Walk color's solution path in order from ep1 to ep2 (it's a
+            -- simple path, so at each step exactly one unvisited same-color
+            -- neighbor exists, except at the final step which is ep2).
+            local n = b.n
+            local visited = {}
+            for r = 1, n do visited[r] = {} end
+            local path = { ep1 }
+            visited[ep1[1]][ep1[2]] = true
+            local cur = ep1
+            while not (cur[1] == ep2[1] and cur[2] == ep2[2]) do
+                local found = false
+                for _, d in ipairs({ {-1,0}, {1,0}, {0,-1}, {0,1} }) do
+                    local nr, nc = cur[1] + d[1], cur[2] + d[2]
+                    if nr >= 1 and nr <= n and nc >= 1 and nc <= n
+                        and b.solution[nr][nc] == color and not visited[nr][nc] then
+                        cur = { nr, nc }
+                        visited[nr][nc] = true
+                        path[#path+1] = cur
+                        found = true
+                        break
+                    end
+                end
+                assert.is_true(found, "solution path for color broke before reaching ep2")
+            end
+
+            b:tapCell(ep1[1], ep1[2])
+            for i = 2, #path do
+                local ok, reason = b:tapCell(path[i][1], path[i][2])
+                assert.is_true(ok, "tap failed at step " .. i .. " reason=" .. tostring(reason))
+            end
+
+            -- The final tap (onto ep2) must have actually extended the path
+            -- onto ep2 and completed it -- not merely repositioned active_end.
+            assert.are.equal(color, b.paths[ep2[1]][ep2[2]])
+            assert.is_nil(b.active_color)
+            assert.is_nil(b.active_end)
+            assert.are.equal(1, b:getCompletedPairs())
+        end)
     end)
 
     describe("holdCell", function()
