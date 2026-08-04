@@ -408,6 +408,26 @@ function NumberlinkBoard:tapCell(r, c)
     local color = self.clues[r][c]  -- is this a fixed endpoint?
 
     if color > 0 then
+        -- If this endpoint is adjacent to the active path's tip (same
+        -- color), treat it like any other adjacent cell: extend onto it
+        -- (completing the path if it's the far endpoint) or retract back
+        -- to it. Without this, tapping the endpoint that closes the loop
+        -- would fall through to _startFromEndpoint below, which only
+        -- repositions active_end without ever adding the cell to the
+        -- path -- the two numbers would never actually connect.
+        if self.active_color == color and self.active_end then
+            local ae_r, ae_c = self.active_end[1], self.active_end[2]
+            local is_adjacent = (math.abs(r - ae_r) + math.abs(c - ae_c)) == 1
+            if is_adjacent and not (ae_r == r and ae_c == c) then
+                if self.paths[r][c] == 0 then
+                    self:_extendPath(r, c)
+                    return true, "extend"
+                elseif self.paths[r][c] == color then
+                    self:_retractToCell(r, c)
+                    return true, "retract"
+                end
+            end
+        end
         -- Tapped an endpoint: start (or switch) drawing from it
         self:_startFromEndpoint(r, c, color)
         return true, "start"
