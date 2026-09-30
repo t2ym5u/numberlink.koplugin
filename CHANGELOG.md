@@ -2,6 +2,19 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.2.0] - 2026-09-30
+
+### Added
+- **Hint** button, working in a whole coloured path rather than in cells. Two taps: the first says which pair's route is not right yet, the second draws it end to end. Revealing a single cell would leave the route half-drawn.
+
+### Fixed
+- Each path now carries its pair's digit in every cell it crosses, not only at
+  its two endpoints. The six path shades are spaced 34/255 apart -- about two
+  steps on a 16-level e-ink panel -- so two neighbouring routes were told apart
+  by shade alone, which on a reflective screen often was not possible.
+- The wrong-cell border was drawn in COLOR_GRAY, which is path colour 5's own
+  shade, so it was invisible against that path. It is black now.
+
 ## [1.1.10] - 2026-07-31
 
 ### Fixed
