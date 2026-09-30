@@ -723,6 +723,98 @@ end
 -- Serialize / Load
 -- ---------------------------------------------------------------------------
 
+-- ---------------------------------------------------------------------------
+-- Hints
+--
+-- `solution` is a grid of colour ids, so a single cell could technically be
+-- revealed -- but path_cells[] holds each colour's route in walking order, and
+-- writing isolated cells would desynchronise it from `paths`. The unit that
+-- keeps both consistent, and the one the player actually thinks in, is a whole
+-- coloured path.
+local DIRS4_HINT = { {0,1}, {0,-1}, {1,0}, {-1,0} }
+
+-- Walks the solution's cells for one colour from an endpoint, so the rebuilt
+-- path_cells entry is in the same order the player's own drawing would be.
+function NumberlinkBoard:_solutionRoute(color)
+    local n = self.n
+    local start
+    for r = 1, n do
+        for c = 1, n do
+            if self.clues[r][c] == color then start = { r, c } break end
+        end
+        if start then break end
+    end
+    if not start then return {} end
+
+    local seen = {}
+    local function key(r, c) return (r - 1) * n + c end
+    local route = { start }
+    seen[key(start[1], start[2])] = true
+    while true do
+        local cur = route[#route]
+        local moved = false
+        for _, d in ipairs(DIRS4_HINT) do
+            local nr, nc = cur[1] + d[1], cur[2] + d[2]
+            if nr >= 1 and nr <= n and nc >= 1 and nc <= n
+               and self.solution[nr][nc] == color and not seen[key(nr, nc)] then
+                seen[key(nr, nc)] = true
+                route[#route + 1] = { nr, nc }
+                moved = true
+                break
+            end
+        end
+        if not moved then break end
+    end
+    return route
+end
+
+function NumberlinkBoard:findHint()
+    if self.reveal then return nil, "stuck" end
+    local n = self.n
+    for color = 1, self.n_colors do
+        local differs = false
+        for r = 1, n do
+            for c = 1, n do
+                local want = (self.solution[r][c] == color) and color or 0
+                local have = (self.paths[r][c] == color) and color or 0
+                if want ~= have then differs = true break end
+            end
+            if differs then break end
+        end
+        if differs then
+            -- getEndpoints returns the two endpoints as two values, not a
+            -- table of two.
+            local a = self:getEndpoints(color)
+            return {
+                kind = "fill", color = color, tag = "c" .. color,
+                r = a and a[1] or 1, c = a and a[2] or 1,
+            }
+        end
+    end
+    return nil, "complete"
+end
+
+function NumberlinkBoard:applyHint(step)
+    if not step or not step.color then return false end
+    local color = step.color
+    self:_clearColorPath(color)
+    local route = self:_solutionRoute(color)
+    for _, cell in ipairs(route) do
+        self.paths[cell[1]][cell[2]] = color
+    end
+    self.path_cells[color] = route
+    self.active_color, self.active_end = nil, nil
+    return true
+end
+
+function NumberlinkBoard:getHintsUsed()
+    return self.hints_used or 0
+end
+
+function NumberlinkBoard:noteHintUsed()
+    self.hints_used = (self.hints_used or 0) + 1
+end
+
 function NumberlinkBoard:serialize()
     local n = self.n
     local pc_out = {}

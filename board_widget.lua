@@ -28,7 +28,9 @@ local COLORS = {
 
 local C_BG        = Blitbuffer.COLOR_WHITE
 local C_ACTIVE    = Blitbuffer.COLOR_GRAY_E   -- active-color highlight
-local C_WRONG     = Blitbuffer.COLOR_GRAY
+-- Not one of the six path shades: COLOR_GRAY is path colour 5, so a wrong-cell
+-- border drawn in it was invisible against that colour's own path.
+local C_WRONG     = Blitbuffer.COLOR_BLACK
 local C_GRID      = Blitbuffer.COLOR_GRAY_6
 local C_TEXT_DARK = Blitbuffer.COLOR_BLACK
 local C_TEXT_WITE = Blitbuffer.COLOR_WHITE
@@ -102,6 +104,23 @@ function NumberlinkBoardWidget:paintTo(bb, x, y)
                 -- Dot at cell center
                 local dot_r = math.max(3, math.floor(cell * 0.18))
                 bb:paintCircle(mx, my, dot_r, col)
+
+                -- And the pair's own digit, small, in every cell the path
+                -- crosses. The six path shades are evenly spaced 34/255 apart,
+                -- which is about two steps on a 16-level e-ink panel: two
+                -- neighbouring paths were told apart by shade alone and, on a
+                -- reflective screen, often could not be. The digit makes the
+                -- identity readable without relying on the greys at all.
+                if self.board.clues[r][c] == 0 and self.note_face then
+                    local label = tostring(color_id)
+                    local dm    = RenderText:sizeUtf8Text(0, cell, self.note_face,
+                                                          label, true, false)
+                    local tcol  = (color_id <= 2) and C_TEXT_WITE or C_TEXT_DARK
+                    RenderText:renderUtf8Text(bb,
+                        mx - math.floor(dm.x / 2),
+                        my + math.floor((dm.y_top - dm.y_bottom) / 2),
+                        self.note_face, label, true, false, tcol)
+                end
             end
         end
     end

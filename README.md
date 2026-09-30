@@ -20,6 +20,7 @@ by exactly one path.
 ## Features
 
 - **Multiple grid sizes** — 5×5, 7×7, 9×9, 10×10
+- **Hint** — two taps, working in a whole coloured path rather than cells
 - **Three difficulty levels** — Easy (fewer pairs), Medium, Hard
 - **Path drawing** — drag or tap-to-extend to draw paths
 - **Auto-clear** — drawing over an existing path segment removes it from that point

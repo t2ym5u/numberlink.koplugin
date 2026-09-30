@@ -65,6 +65,16 @@ Appuyez sur une case numérotée pour commencer un chemin, puis appuyez sur les 
 
 local NumberlinkScreen = ScreenBase:extend{}
 
+-- The unit is a whole coloured path: revealing one cell of one would leave the
+-- route half-drawn and say little, since the puzzle is about the route.
+function NumberlinkScreen:describeHintStep(step, level)
+    if level == 1 then
+        return T(_("The path starting at R%1C%2 is not right yet. Tap Hint again to draw it."),
+                 step.r, step.c)
+    end
+    return T(_("Drew the path starting at R%1C%2."), step.r, step.c)
+end
+
 function NumberlinkScreen:init()
     local state = self.plugin:loadState()
     local n     = self.plugin:getSetting("grid_n", 5)
@@ -121,6 +131,7 @@ function NumberlinkScreen:buildLayout()
         buttons = {
             {
                 { text = _("Check"), callback = function() self:onCheck() end },
+                { text = _("Hint"), callback = function() self:onHint() end },
                 { id = "undo_button", text = _("Undo"),
                   callback = function() self:onUndo() end },
             },
