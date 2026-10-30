@@ -2,6 +2,30 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.3.0] - 2026-10-30
+
+### Added
+- "New game" once the puzzle is solved: the action bar shows it in place of
+  Check, Hint and Undo, so the next puzzle no longer needs the menu. Showing
+  the solution does not end the round, since it can be hidden again.
+
+### Changed
+- Redesigned play screen, in line with the other games: a full-width action
+  bar, a larger board that fills the available room, and one frame around
+  it. The status line reads "size · difficulty · Empty: n" and wraps in
+  landscape instead of being cut off.
+- Title-bar menu in the same order as every other game, with the current
+  values shown: "Size: …" (was "Grid: …"), "Difficulty: …" (was "Diff:
+  …"), and "Show solution" / "Hide solution" (was a bare "Show" / "Hide").
+- New README screenshot.
+
+### Fixed
+- On boards with ten or more pairs, the two-digit endpoint numbers
+  overflowed their cells; the font is now sized for them.
+- Using Hint wiped the saved game: the board was saved as nothing. And when
+  a hint fills the last cell, the status now shows the win message.
+- The grid's closing lines were drawn just past its right and bottom edges.
+
 ## [1.2.2] - 2026-10-07
 
 ### Fixed
