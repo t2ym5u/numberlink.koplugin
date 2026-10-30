@@ -95,6 +95,7 @@ function NumberlinkScreen:buildLayout()
     local title_bar = self:buildTitleBar(_("Numberlink"), function()
         return {
             { text = _("New game"),            callback = function() self:onNewGame() end },
+            self:makeDailyButtonConfig(),
             { text = self:getGridButtonText(), callback = function() self:openGridMenu() end },
             { text = self:getDiffButtonText(), callback = function() self:openDifficultyMenu() end },
             { text = self:getRevealButtonText(), callback = function() self:toggleSolution() end },
