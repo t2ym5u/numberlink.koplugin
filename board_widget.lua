@@ -128,8 +128,9 @@ function NumberlinkBoardWidget:paintTo(bb, x, y)
     -- Draw grid lines (thin, on top of paths)
     local thin = Size.line.thin or 1
     for i = 0, n do
-        drawLine(bb, x + math.floor(i*cell), y, thin, self.dimen.h, C_GRID)
-        drawLine(bb, x, y + math.floor(i*cell), self.dimen.w, thin, C_GRID)
+        local pos = math.min(math.floor(i*cell), self.dimen.w - thin)
+        drawLine(bb, x + pos, y, thin, self.dimen.h, C_GRID)
+        drawLine(bb, x, y + pos, self.dimen.w, thin, C_GRID)
     end
 
     -- Draw wrong marks overlay
