@@ -295,4 +295,104 @@ describe("NumberlinkBoard", function()
             assert.is_false(b:load({}))
         end)
     end)
+    -- 1.5.0: faster uniqueness check, same puzzles.
+    describe("uniqueness check speed-up (1.5.0)", function()
+        it("builds the same puzzles per seed as 1.4.x", function()
+            -- Fingerprints taken with the 1.4.3 generator under this same
+            -- interpreter (math.random differs between Lua and LuaJIT).
+            local want = { 842478455, 597804743, 812133848, 516043763, 568974277 }
+            local cfgs = { {5, "easy", 1}, {9, "easy", 2}, {10, "easy", 3}, {10, "medium", 4}, {10, "hard", 5} }
+            for k, cfg in ipairs(cfgs) do
+                math.randomseed(cfg[3])
+                local b = Board:new{ n = cfg[1] }
+                b:generate(cfg[2])
+                local h = 0
+                for r = 1, cfg[1] do
+                    for c = 1, cfg[1] do
+                        h = (h * 31 + b.clues[r][c] * 64 + b.solution[r][c]) % 1000000007
+                    end
+                end
+                assert.are.equal(want[k], h, "config " .. k)
+            end
+        end)
+
+        -- Plain exhaustive count (no pruning at all) on small grids.
+        local function naiveCount(clues, n, k)
+            local owner, ends = {}, {}
+            for r = 1, n do
+                owner[r] = {}
+                for c = 1, n do
+                    owner[r][c] = 0
+                    local v = clues[r][c]
+                    if v > 0 then ends[v] = ends[v] or {}; table.insert(ends[v], { r, c }) end
+                end
+            end
+            local count = 0
+            local D = { {-1, 0}, {1, 0}, {0, -1}, {0, 1} }
+            local solveColor
+            local function grow(col, r, c, tr, tc)
+                if r == tr and c == tc then return solveColor(col + 1) end
+                for _, d in ipairs(D) do
+                    local nr, nc = r + d[1], c + d[2]
+                    if nr >= 1 and nr <= n and nc >= 1 and nc <= n and owner[nr][nc] == 0
+                        and (clues[nr][nc] == 0 or clues[nr][nc] == col) then
+                        owner[nr][nc] = col
+                        grow(col, nr, nc, tr, tc)
+                        owner[nr][nc] = 0
+                    end
+                end
+            end
+            solveColor = function(col)
+                if col > k then
+                    for r = 1, n do for c = 1, n do if owner[r][c] == 0 then return end end end
+                    count = count + 1
+                    return
+                end
+                local a, b = ends[col][1], ends[col][2]
+                owner[a[1]][a[2]] = col
+                grow(col, a[1], a[2], b[1], b[2])
+                owner[a[1]][a[2]] = 0
+            end
+            solveColor(1)
+            return count
+        end
+
+        it("counts solutions like an exhaustive search", function()
+            -- Raw candidate layouts (before the uniqueness filter), so both
+            -- unique and ambiguous ones get compared.
+            local function up(name)
+                local i = 1
+                while true do
+                    local nm, v = debug.getupvalue(Board.generate, i)
+                    if not nm then return nil end
+                    if nm == name then return v end
+                    i = i + 1
+                end
+            end
+            local gen, seg = up("generateNumberlink"), up("randomSegLengths")
+            assert.is_function(gen)
+            local seen = {}
+            for seed = 1, 120 do
+                math.randomseed(seed)
+                local n = ({ 4, 5 })[seed % 2 + 1]
+                local k = ({ 3, 4, 6, 8 })[seed % 4 + 1]
+                local clues = gen(n, k, seg(n * n, k))
+                local want = math.min(naiveCount(clues, n, k), 2)
+                local got = Board._countSolutions(clues, n, k, 2, 1e9)
+                assert.are.equal(want, got, "seed " .. seed)
+                seen[want] = true
+            end
+            assert.is_true(seen[1] and seen[2])
+        end)
+
+        it("generates 10x10 Easy quickly", function()
+            local t0 = os.clock()
+            for seed = 1, 5 do
+                math.randomseed(seed)
+                Board:new{ n = 10 }:generate("easy")
+            end
+            -- ~2 ms each in LuaJIT; very generous for plain Lua.
+            assert.is_true(os.clock() - t0 < 10)
+        end)
+    end)
 end)

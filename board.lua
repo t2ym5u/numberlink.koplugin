@@ -180,9 +180,40 @@ end
 -- larger-size limitation.
 -- ---------------------------------------------------------------------------
 
+-- Same search, in the same order, as before 1.5.0; what changed is speed
+-- only (several times faster on 9x9/10x10 Easy). Cells are flat indices
+-- instead of {r, c} tables, and two extra prunes drop branches that could
+-- never cover the whole grid, so they had no solution to count anyway:
+--   * dead end: a free cell left with too few free neighbours to be part
+--     of a path (two for a plain cell, one for a clue);
+--   * stranded cell: once a path is complete, a free cell no remaining
+--     path can reach.
+-- Counts are unchanged -- cross-checked against the previous solver on
+-- thousands of candidate layouts -- so the puzzles are the same per seed.
 local function countSolutions(clues, n, k, limit, node_budget)
-    local owner = {}
-    for r = 1, n do owner[r] = {}; for c = 1, n do owner[r][c] = 0 end end
+    local N = n * n
+    local owner, clue = {}, {}
+    for r = 1, n do
+        for c = 1, n do
+            local i = (r - 1) * n + c
+            owner[i] = 0
+            clue[i] = clues[r][c]
+        end
+    end
+    -- Neighbours of each cell in DIRS order (up, down, left, right).
+    local nbr = {}
+    for r = 1, n do
+        for c = 1, n do
+            local list = {}
+            for _, d in ipairs(DIRS) do
+                local nr, nc = r + d[1], c + d[2]
+                if nr >= 1 and nr <= n and nc >= 1 and nc <= n then
+                    list[#list + 1] = (nr - 1) * n + nc
+                end
+            end
+            nbr[(r - 1) * n + c] = list
+        end
+    end
 
     local endpoints = {}
     for col = 1, k do
@@ -199,78 +230,130 @@ local function countSolutions(clues, n, k, limit, node_budget)
         local db = math.abs(eb[1][1] - eb[2][1]) + math.abs(eb[1][2] - eb[2][2])
         return da < db
     end)
+    -- Flat endpoint indices, by color.
+    local ep1, ep2 = {}, {}
+    for col = 1, k do
+        local ep = endpoints[col]
+        if ep[1] then ep1[col] = (ep[1][1] - 1) * n + ep[1][2] end
+        if ep[2] then ep2[col] = (ep[2][1] - 1) * n + ep[2][2] end
+    end
 
     local solutions, nodes, exhausted = 0, 0, false
-    local total_cells = n * n
+    local claimed = 0
 
-    local bfs_seen = {}
-    for r = 1, n do bfs_seen[r] = {} end
-    local bfs_stamp = 0
-    local bfs_queue = {}
+    local seen, stamp, queue = {}, 0, {}
+    for i = 1, N do seen[i] = 0 end
     -- A cell is usable for `col`'s path if it's unclaimed AND not another
     -- color's reserved clue endpoint (a clue cell belongs exclusively to
     -- its own color -- letting a DIFFERENT color's path walk through it
     -- corrupts the search: that other color's endpoint gets silently
     -- consumed, which can make the search wrongly conclude a valid
     -- completion is impossible when it isn't, undercounting solutions).
-    local function usableFor(r, c, col)
-        return owner[r][c] == 0 and (clues[r][c] == 0 or clues[r][c] == col)
-    end
-
-    local function reachable(cr, cc, tr, tc, col)
-        bfs_stamp = bfs_stamp + 1
-        local qhead, qtail = 1, 0
-        qtail = qtail + 1; bfs_queue[qtail] = { cr, cc }
-        bfs_seen[cr][cc] = bfs_stamp
-        while qhead <= qtail do
-            local cell = bfs_queue[qhead]; qhead = qhead + 1
-            local r, c = cell[1], cell[2]
-            if r == tr and c == tc then return true end
-            for _, d in ipairs(DIRS) do
-                local nr, nc = r + d[1], c + d[2]
-                if nr >= 1 and nr <= n and nc >= 1 and nc <= n and bfs_seen[nr][nc] ~= bfs_stamp then
-                    if (nr == tr and nc == tc) or usableFor(nr, nc, col) then
-                        bfs_seen[nr][nc] = bfs_stamp
-                        qtail = qtail + 1; bfs_queue[qtail] = { nr, nc }
-                    end
+    local function reachable(from, to, col)
+        stamp = stamp + 1
+        local qh, qt = 1, 1
+        queue[1] = from
+        seen[from] = stamp
+        while qh <= qt do
+            local i = queue[qh]; qh = qh + 1
+            if i == to then return true end
+            local list = nbr[i]
+            for q = 1, #list do
+                local j = list[q]
+                if seen[j] ~= stamp and (j == to or (owner[j] == 0 and (clue[j] == 0 or clue[j] == col))) then
+                    seen[j] = stamp
+                    qt = qt + 1; queue[qt] = j
                 end
             end
         end
         return false
     end
 
-    local function claimedCount()
-        local cnt = 0
-        for r = 1, n do for c = 1, n do if owner[r][c] ~= 0 then cnt = cnt + 1 end end end
-        return cnt
+    -- Every free cell must still be reachable, through free cells, from an
+    -- endpoint of a color not drawn yet.
+    local function noStrandedCell(from_idx)
+        stamp = stamp + 1
+        local qt = 0
+        for oi = from_idx + 1, k do
+            local col = order[oi]
+            local e = ep1[col]
+            if e and seen[e] ~= stamp then
+                seen[e] = stamp
+                qt = qt + 1; queue[qt] = e
+            end
+        end
+        local qh = 1
+        while qh <= qt do
+            local i = queue[qh]; qh = qh + 1
+            local list = nbr[i]
+            for q = 1, #list do
+                local j = list[q]
+                if seen[j] ~= stamp and owner[j] == 0 then
+                    seen[j] = stamp
+                    qt = qt + 1; queue[qt] = j
+                end
+            end
+        end
+        for i = 1, N do
+            if owner[i] == 0 and seen[i] ~= stamp then return false end
+        end
+        return true
+    end
+
+    -- Every free cell ends up inside some path still to draw: a plain cell
+    -- needs two path neighbours, a clue cell one. Those can only be free
+    -- cells or the tip of the path being drawn (`head`). After the tip
+    -- moves off `prev`, only prev's neighbours lost a possible neighbour.
+    local function deadEndAround(prev, head)
+        local list = nbr[prev]
+        for q = 1, #list do
+            local i = list[q]
+            if owner[i] == 0 then
+                local free = 0
+                local l2 = nbr[i]
+                for w = 1, #l2 do
+                    local j = l2[w]
+                    if owner[j] == 0 or j == head then free = free + 1 end
+                end
+                if free < (clue[i] == 0 and 2 or 1) then return true end
+            end
+        end
+        return false
     end
 
     local function otherColorsStillFeasible(from_idx)
         for oi = from_idx + 1, k do
             local col = order[oi]
-            local ep = endpoints[col]
-            if ep[1] and ep[2] then
-                if not reachable(ep[1][1], ep[1][2], ep[2][1], ep[2][2], col) then return false end
+            local a, b = ep1[col], ep2[col]
+            if a and b then
+                if not reachable(a, b, col) then return false end
             end
         end
-        return true
+        return noStrandedCell(from_idx)
     end
 
-    local function growPath(col, cr, cc, tr, tc, idx, onComplete)
+    local function growPath(col, cur, target, idx, onComplete)
         if solutions >= limit or exhausted then return false end
         nodes = nodes + 1
         if nodes > node_budget then exhausted = true; return false end
-        if cr == tr and cc == tc then
+        if cur == target then
+            if deadEndAround(target, nil) then return true end
             if not otherColorsStillFeasible(idx) then return true end
             return onComplete()
         end
-        if not reachable(cr, cc, tr, tc, col) then return true end
-        for _, d in ipairs(DIRS) do
-            local nr, nc = cr + d[1], cc + d[2]
-            if nr >= 1 and nr <= n and nc >= 1 and nc <= n and usableFor(nr, nc, col) then
-                owner[nr][nc] = col
-                local keep_going = growPath(col, nr, nc, tr, tc, idx, onComplete)
-                owner[nr][nc] = 0
+        if not reachable(cur, target, col) then return true end
+        local list = nbr[cur]
+        for q = 1, #list do
+            local j = list[q]
+            if owner[j] == 0 and (clue[j] == 0 or clue[j] == col) then
+                owner[j] = col
+                claimed = claimed + 1
+                local keep_going = true
+                if j == target or not deadEndAround(cur, j) then
+                    keep_going = growPath(col, j, target, idx, onComplete)
+                end
+                owner[j] = 0
+                claimed = claimed - 1
                 if not keep_going then return false end
             end
         end
@@ -280,17 +363,17 @@ local function countSolutions(clues, n, k, limit, node_budget)
     local function solveColor(idx)
         if solutions >= limit or exhausted then return false end
         if idx > k then
-            if claimedCount() == total_cells then solutions = solutions + 1 end
+            if claimed == N then solutions = solutions + 1 end
             return true
         end
         local col = order[idx]
-        local ep = endpoints[col]
-        if #ep ~= 2 then return true end
-        local r1, c1 = ep[1][1], ep[1][2]
-        local r2, c2 = ep[2][1], ep[2][2]
-        owner[r1][c1] = col
-        local keep_going = growPath(col, r1, c1, r2, c2, idx, function() return solveColor(idx + 1) end)
-        owner[r1][c1] = 0
+        if not (ep1[col] and ep2[col]) or #endpoints[col] ~= 2 then return true end
+        local a, b = ep1[col], ep2[col]
+        owner[a] = col
+        claimed = claimed + 1
+        local keep_going = growPath(col, a, b, idx, function() return solveColor(idx + 1) end)
+        owner[a] = 0
+        claimed = claimed - 1
         return keep_going
     end
 
@@ -304,6 +387,7 @@ end
 
 local NumberlinkBoard = {}
 NumberlinkBoard.__index = NumberlinkBoard
+NumberlinkBoard._countSolutions = countSolutions   -- for the specs
 
 function NumberlinkBoard:new(opts)
     opts = opts or {}

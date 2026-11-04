@@ -2,5 +2,5 @@ local _ = require("gettext")
 return {
     fullname    = _("Numberlink"),
     description = _("Connect each pair of matching numbers with a path covering every cell."),
-    version     = "1.4.3",
+    version     = "1.5.0",
 }
