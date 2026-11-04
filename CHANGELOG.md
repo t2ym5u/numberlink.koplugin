@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.5.0] - 2026-11-04
+
+### Changed
+- Much faster uniqueness check, same puzzles: 9×9 and 10×10 Easy went from
+  up to 50-75 ms on a desktop (1-2 s on a Kobo) to under 10 ms. The check
+  now drops dead-end branches early (a free cell that no path can still
+  cover).
+
 ## [1.4.3] - 2026-11-03
 
 ### Changed
