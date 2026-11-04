@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.5.1] - 2026-11-04
+
+### Fixed
+- Undo no longer crashes the game: the board's move history was stored
+  under the same name as the Undo action, which hid it.
+
 ## [1.5.0] - 2026-11-04
 
 ### Changed
