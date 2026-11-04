@@ -182,7 +182,9 @@ function NumberlinkScreen:onNewGame()
 end
 
 function NumberlinkScreen:onUndo()
-    local ok, msg = self.board:undo()
+    -- Board.undo, not self.board:undo(): the board keeps its UndoStack in a
+    -- field named `undo`, which hides the method on the instance.
+    local ok, msg = NumberlinkBoard.undo(self.board)
     if ok then
         self.last_check_result = nil
         self.plugin:saveState(self.board:serialize())
