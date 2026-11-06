@@ -27,6 +27,7 @@ local T               = require("ffi/util").template
 
 local ScreenBase             = lrequire_common("screen_base")
 local MenuHelper             = lrequire_common("menu_helper")
+local GenProgress            = lrequire_common("gen_progress")
 local NumberlinkBoardWidget  = lrequire("board_widget")
 local NumberlinkBoard        = lrequire("board")
 
@@ -79,7 +80,8 @@ function NumberlinkScreen:init()
     local n     = self.plugin:getSetting("grid_n", 5)
     self.board  = NumberlinkBoard:new{ n = n }
     if not self.board:load(state) then
-        self.board:generate(self.plugin:getSetting("difficulty", "easy"))
+        local diff = self.plugin:getSetting("difficulty", "easy")
+        GenProgress.run(function(on_progress) self.board:generate(diff, on_progress) end)
     end
     self.last_check_result = nil
     ScreenBase.init(self)
@@ -174,7 +176,7 @@ function NumberlinkScreen:onNewGame()
     local diff = self.plugin:getSetting("difficulty", "easy")
     local n    = self.plugin:getSetting("grid_n", 5)
     self.board = NumberlinkBoard:new{ n = n }
-    self.board:generate(diff)
+    GenProgress.run(function(on_progress) self.board:generate(diff, on_progress) end)
     self.last_check_result = nil
     self.plugin:saveState(self.board:serialize())
     self:buildLayout()

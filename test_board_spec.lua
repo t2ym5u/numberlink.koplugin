@@ -295,88 +295,74 @@ describe("NumberlinkBoard", function()
             assert.is_false(b:load({}))
         end)
     end)
-    -- 1.5.0: faster uniqueness check, same puzzles.
-    describe("uniqueness check speed-up (1.5.0)", function()
-        it("builds the same puzzles per seed as 1.4.x", function()
-            -- Fingerprints taken with the 1.4.3 generator under this same
-            -- interpreter (math.random differs between Lua and LuaJIT).
-            local want = { 842478455, 597804743, 812133848, 516043763, 568974277 }
-            local cfgs = { {5, "easy", 1}, {9, "easy", 2}, {10, "easy", 3}, {10, "medium", 4}, {10, "hard", 5} }
-            for k, cfg in ipairs(cfgs) do
-                math.randomseed(cfg[3])
-                local b = Board:new{ n = cfg[1] }
-                b:generate(cfg[2])
-                local h = 0
-                for r = 1, cfg[1] do
-                    for c = 1, cfg[1] do
-                        h = (h * 31 + b.clues[r][c] * 64 + b.solution[r][c]) % 1000000007
-                    end
-                end
-                assert.are.equal(want[k], h, "config " .. k)
+    -- Plain exhaustive count (no pruning at all) on small grids.
+    local function naiveCount(clues, n, k)
+        local owner, ends = {}, {}
+        for r = 1, n do
+            owner[r] = {}
+            for c = 1, n do
+                owner[r][c] = 0
+                local v = clues[r][c]
+                if v > 0 then ends[v] = ends[v] or {}; table.insert(ends[v], { r, c }) end
             end
-        end)
-
-        -- Plain exhaustive count (no pruning at all) on small grids.
-        local function naiveCount(clues, n, k)
-            local owner, ends = {}, {}
-            for r = 1, n do
-                owner[r] = {}
-                for c = 1, n do
-                    owner[r][c] = 0
-                    local v = clues[r][c]
-                    if v > 0 then ends[v] = ends[v] or {}; table.insert(ends[v], { r, c }) end
-                end
-            end
-            local count = 0
-            local D = { {-1, 0}, {1, 0}, {0, -1}, {0, 1} }
-            local solveColor
-            local function grow(col, r, c, tr, tc)
-                if r == tr and c == tc then return solveColor(col + 1) end
-                for _, d in ipairs(D) do
-                    local nr, nc = r + d[1], c + d[2]
-                    if nr >= 1 and nr <= n and nc >= 1 and nc <= n and owner[nr][nc] == 0
-                        and (clues[nr][nc] == 0 or clues[nr][nc] == col) then
-                        owner[nr][nc] = col
-                        grow(col, nr, nc, tr, tc)
-                        owner[nr][nc] = 0
-                    end
-                end
-            end
-            solveColor = function(col)
-                if col > k then
-                    for r = 1, n do for c = 1, n do if owner[r][c] == 0 then return end end end
-                    count = count + 1
-                    return
-                end
-                local a, b = ends[col][1], ends[col][2]
-                owner[a[1]][a[2]] = col
-                grow(col, a[1], a[2], b[1], b[2])
-                owner[a[1]][a[2]] = 0
-            end
-            solveColor(1)
-            return count
         end
-
-        it("counts solutions like an exhaustive search", function()
-            -- Raw candidate layouts (before the uniqueness filter), so both
-            -- unique and ambiguous ones get compared.
-            local function up(name)
-                local i = 1
-                while true do
-                    local nm, v = debug.getupvalue(Board.generate, i)
-                    if not nm then return nil end
-                    if nm == name then return v end
-                    i = i + 1
+        local count = 0
+        local D = { {-1, 0}, {1, 0}, {0, -1}, {0, 1} }
+        local solveColor
+        local function grow(col, r, c, tr, tc)
+            if r == tr and c == tc then return solveColor(col + 1) end
+            for _, d in ipairs(D) do
+                local nr, nc = r + d[1], c + d[2]
+                if nr >= 1 and nr <= n and nc >= 1 and nc <= n and owner[nr][nc] == 0
+                    and (clues[nr][nc] == 0 or clues[nr][nc] == col) then
+                    owner[nr][nc] = col
+                    grow(col, nr, nc, tr, tc)
+                    owner[nr][nc] = 0
                 end
             end
-            local gen, seg = up("generateNumberlink"), up("randomSegLengths")
-            assert.is_function(gen)
+        end
+        solveColor = function(col)
+            if col > k then
+                for r = 1, n do for c = 1, n do if owner[r][c] == 0 then return end end end
+                count = count + 1
+                return
+            end
+            local a, b = ends[col][1], ends[col][2]
+            owner[a[1]][a[2]] = col
+            grow(col, a[1], a[2], b[1], b[2])
+            owner[a[1]][a[2]] = 0
+        end
+        solveColor(1)
+        return count
+    end
+
+    local function flatClues(b)
+        local clue = {}
+        for r = 1, b.n do for c = 1, b.n do clue[(r - 1) * b.n + c] = b.clues[r][c] end end
+        return clue
+    end
+
+    -- Random candidate layouts (before any filter), as clue grids.
+    local function candidate(n, target)
+        local paths
+        repeat paths = Board._randomPartition(n, target, Board._gridLinks(n)) until paths
+        local clues = {}
+        for r = 1, n do clues[r] = {} for c = 1, n do clues[r][c] = 0 end end
+        for colour, p in ipairs(paths) do
+            for _, i in ipairs({ p[1], p[#p] }) do
+                clues[math.floor((i - 1) / n) + 1][(i - 1) % n + 1] = colour
+            end
+        end
+        return clues, #paths
+    end
+
+    describe("solution counter", function()
+        it("counts solutions like an exhaustive search", function()
             local seen = {}
             for seed = 1, 120 do
                 math.randomseed(seed)
                 local n = ({ 4, 5 })[seed % 2 + 1]
-                local k = ({ 3, 4, 6, 8 })[seed % 4 + 1]
-                local clues = gen(n, k, seg(n * n, k))
+                local clues, k = candidate(n, ({ 2, 3, 4, 6 })[seed % 4 + 1])
                 local want = math.min(naiveCount(clues, n, k), 2)
                 local got = Board._countSolutions(clues, n, k, 2, 1e9)
                 assert.are.equal(want, got, "seed " .. seed)
@@ -384,15 +370,233 @@ describe("NumberlinkBoard", function()
             end
             assert.is_true(seen[1] and seen[2])
         end)
+    end)
 
-        it("generates 10x10 Easy quickly", function()
+    -- 1.6.0: random paths instead of the cut-up snake, a no-trial solver,
+    -- and levels that really differ (Hard used to be the easiest).
+    describe("levels (1.6.0)", function()
+        local SIZES, LEVELS = { 5, 7, 9, 10 }, { "easy", "medium", "hard" }
+        local SEEDS = 10
+        local results = {}   -- results[n][level] = list of { k=, work=, two= }
+
+        setup(function()
+            for _, n in ipairs(SIZES) do
+                results[n] = {}
+                for _, d in ipairs(LEVELS) do
+                    local list = {}
+                    for seed = 1, SEEDS do
+                        math.randomseed(1000 * n + seed)
+                        local b = Board:new{ n = n }
+                        b:generate(d)
+                        local lv = Board._levelFor(n, d)
+                        local ok, st = Board._logicSolve(flatClues(b), n, b.n_colors, lv.tier)
+                        local cnt = {}
+                        for r = 1, n do for c = 1, n do
+                            local v = b.solution[r][c]; cnt[v] = (cnt[v] or 0) + 1
+                        end end
+                        local two = 0
+                        for col = 1, b.n_colors do if cnt[col] == 2 then two = two + 1 end end
+                        list[#list + 1] = { b = b, lv = lv, ok = ok, st = st, k = b.n_colors,
+                                            work = ok and Board._workOf(st), two = two }
+                    end
+                    results[n][d] = list
+                end
+            end
+        end)
+
+        it("every puzzle is finished by reasoning alone, within its level's tier", function()
+            for _, n in ipairs(SIZES) do
+                for _, d in ipairs(LEVELS) do
+                    for s, r in ipairs(results[n][d]) do
+                        local where = ("%dx%d %s seed %d"):format(n, n, d, s)
+                        assert.is_true(r.ok, where)
+                        assert.is_false(r.b.gen_info.rescued, where)
+                        assert.is_true(r.k >= r.lv.min_colours and r.k <= r.lv.max_colours, where)
+                        if d ~= "hard" then
+                            assert.are.equal(0, r.st.t2, where)
+                        end
+                        -- the solver's colours are the stored solution
+                        local _, _, owner = Board._logicSolve(flatClues(r.b), n, r.k, 2)
+                        for i = 1, n * n do
+                            local row, col = math.floor((i - 1) / n) + 1, (i - 1) % n + 1
+                            assert.are.equal(r.b.solution[row][col], owner[i], where)
+                        end
+                    end
+                end
+            end
+        end)
+
+        it("Easy, Medium and Hard differ: fewer, longer paths and more reasoning", function()
+            for _, n in ipairs(SIZES) do
+                local mk, mw = {}, {}
+                for li, d in ipairs(LEVELS) do
+                    local k, w = 0, 0
+                    for _, r in ipairs(results[n][d]) do k = k + r.k; w = w + r.work end
+                    mk[li], mw[li] = k / SEEDS, w / SEEDS
+                end
+                assert.is_true(mk[1] > mk[2] and mk[2] > mk[3], n .. ": colours")
+                assert.is_true(mw[1] < mw[2] and mw[2] < mw[3], n .. ": work")
+            end
+        end)
+
+        it("pairs of side-by-side numbers stay a minority", function()
+            for _, n in ipairs(SIZES) do
+                for _, d in ipairs(LEVELS) do
+                    local two, k = 0, 0
+                    for _, r in ipairs(results[n][d]) do two = two + r.two; k = k + r.k end
+                    assert.is_true(two / k < 0.35, ("%dx%d %s: %d/%d"):format(n, n, d, two, k))
+                end
+            end
+        end)
+
+        it("small puzzles have exactly one solution (exhaustive count)", function()
+            for _, n in ipairs({ 5, 7 }) do
+                for _, d in ipairs(LEVELS) do
+                    for s, r in ipairs(results[n][d]) do
+                        local sol, exhausted = Board._countSolutions(r.b.clues, n, r.k, 2, 1e7)
+                        assert.is_false(exhausted)
+                        assert.are.equal(1, sol, ("%dx%d %s seed %d"):format(n, n, d, s))
+                    end
+                end
+            end
+        end)
+
+        it("whenever the solver finishes a candidate, it has one solution", function()
+            local finished = 0
+            for seed = 1, 150 do
+                math.randomseed(seed)
+                local n = ({ 4, 5, 6 })[seed % 3 + 1]
+                local clues, k = candidate(n, ({ 2, 3, 4, 5 })[seed % 4 + 1])
+                local flat = {}
+                for r = 1, n do for c = 1, n do flat[(r - 1) * n + c] = clues[r][c] end end
+                if Board._logicSolve(flat, n, k, 2) then
+                    finished = finished + 1
+                    assert.are.equal(1, Board._countSolutions(clues, n, k, 2, 1e9), "seed " .. seed)
+                end
+            end
+            assert.is_true(finished > 30)
+        end)
+
+        it("same seed, same puzzle (the Daily Challenge relies on it)", function()
+            for _, d in ipairs(LEVELS) do
+                local grids = {}
+                for t = 1, 2 do
+                    math.randomseed(77)
+                    local b = Board:new{ n = 9 }
+                    b:generate(d)
+                    grids[t] = b
+                end
+                for r = 1, 9 do for c = 1, 9 do
+                    assert.are.equal(grids[1].clues[r][c], grids[2].clues[r][c])
+                    assert.are.equal(grids[1].solution[r][c], grids[2].solution[r][c])
+                end end
+            end
+        end)
+
+        it("generates 10x10 Hard quickly", function()
             local t0 = os.clock()
             for seed = 1, 5 do
                 math.randomseed(seed)
-                Board:new{ n = 10 }:generate("easy")
+                Board:new{ n = 10 }:generate("hard")
             end
-            -- ~2 ms each in LuaJIT; very generous for plain Lua.
+            -- ~5 ms each in LuaJIT; very generous for plain Lua.
             assert.is_true(os.clock() - t0 < 10)
+        end)
+
+        it("reports progress while generating", function()
+            local calls = 0
+            math.randomseed(3)
+            Board:new{ n = 7 }:generate("hard", function(f)
+                calls = calls + 1
+                assert.is_true(f > 0 and f <= 1)
+            end)
+            assert.is_true(calls >= 1)
+        end)
+    end)
+
+    describe("win check (1.6.0)", function()
+        -- 3x3, one pair in opposite corners: two different full snakes.
+        local function snakeBoard()
+            local b = Board:new{ n = 3 }
+            b.n_colors = 1
+            b.clues = { { 1, 0, 0 }, { 0, 0, 0 }, { 0, 0, 1 } }
+            b.solution = { { 1, 1, 1 }, { 1, 1, 1 }, { 1, 1, 1 } }
+            b.path_cells = { {} }
+            return b
+        end
+
+        it("accepts any drawing that keeps the rules", function()
+            local b = snakeBoard()
+            -- columns-first snake; the stored "solution" could be either
+            local route = { {1,1}, {2,1}, {3,1}, {3,2}, {2,2}, {1,2}, {1,3}, {2,3}, {3,3} }
+            for _, cell in ipairs(route) do b.paths[cell[1]][cell[2]] = 1 end
+            b.path_cells[1] = route
+            assert.is_true(b:isSolved())
+        end)
+
+        it("accepts a drawn route on a grid with an alternative solution", function()
+            -- 1 . 1 / 2 . 2 style: solution says row paths, player draws them too
+            local b = Board:new{ n = 2 }
+            b.n_colors = 2
+            b.clues = { { 1, 1 }, { 2, 2 } }
+            b.solution = { { 1, 1 }, { 2, 2 } }
+            b.paths = { { 1, 1 }, { 2, 2 } }
+            b.path_cells = { { {1,1}, {1,2} }, { {2,1}, {2,2} } }
+            assert.is_true(b:isSolved())
+        end)
+
+        it("rejects uncovered cells, broken paths and detached loops", function()
+            local b = snakeBoard()
+            -- every cell coloured but no route drawn and the colour is a
+            -- blob, not a path
+            for r = 1, 3 do for c = 1, 3 do b.paths[r][c] = 1 end end
+            assert.is_false(b:isSolved())
+            -- route that skips a cell
+            local b2 = snakeBoard()
+            local route = { {1,1}, {2,1}, {3,1}, {3,2}, {3,3} }
+            for _, cell in ipairs(route) do b2.paths[cell[1]][cell[2]] = 1 end
+            b2.path_cells[1] = route
+            assert.is_false(b2:isSolved())
+            -- 4x4: a path plus a separate loop of the same colour
+            local b3 = Board:new{ n = 4 }
+            b3.n_colors = 1
+            b3.clues = { { 1, 0, 0, 1 }, { 0, 0, 0, 0 }, { 0, 0, 0, 0 }, { 0, 0, 0, 0 } }
+            b3.paths = { { 1, 1, 1, 1 }, { 0, 0, 0, 0 }, { 1, 1, 0, 0 }, { 1, 1, 0, 0 } }
+            b3.path_cells = { {} }
+            assert.is_false(b3:isSolved())
+        end)
+    end)
+
+    describe("old saves", function()
+        it("loads a 1.5.x save (snake layout) and still plays it", function()
+            -- 5x5 Easy from 1.5.3: the snake cut into 6 colours (colour 4
+            -- even fills a 2x2 block).
+            local sol = {
+                { 1, 1, 1, 1, 1 },
+                { 3, 2, 2, 2, 1 },
+                { 3, 3, 3, 4, 4 },
+                { 5, 5, 5, 4, 4 },
+                { 5, 6, 6, 6, 6 },
+            }
+            local clues = {
+                { 1, 0, 0, 0, 0 },
+                { 3, 2, 0, 2, 1 },
+                { 0, 0, 3, 4, 0 },
+                { 0, 0, 5, 4, 0 },
+                { 5, 6, 0, 0, 6 },
+            }
+            local data = {
+                n = 5, difficulty = "easy", n_colors = 6, clues = clues, solution = sol,
+                paths = { {0,0,0,0,0}, {0,0,0,0,0}, {0,0,0,0,0}, {0,0,0,0,0}, {0,0,0,0,0} },
+                path_cells = { {}, {}, {}, {}, {}, {} }, reveal = false,
+            }
+            local b = Board:new{ n = 5 }
+            assert.is_true(b:load(data))
+            assert.are.equal(6, b.n_colors)
+            assert.is_false(b:isSolved())
+            -- Fill each colour with the hint's route: solved.
+            for colour = 1, 6 do b:applyHint({ color = colour }) end
+            assert.is_true(b:isSolved())
         end)
     end)
 end)

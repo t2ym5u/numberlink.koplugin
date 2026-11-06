@@ -2,6 +2,37 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.6.0] - 2026-11-05
+
+### Changed
+- Difficulty levels now work the right way round. Before, Hard had the
+  most pairs, so about 60% of them were two numbers side by side and the
+  puzzle almost solved itself, while Easy was the hardest. Now Easy has many
+  short paths, Medium fewer and longer ones, and Hard the fewest and
+  longest (for example 10×10: about 19, 16 and 14 pairs, against 25, 32
+  and 40 before), and each harder level needs more reasoning steps.
+- New puzzle shapes: paths are now grown at random across the grid.
+  Before, every solution was the same back-and-forth snake cut into
+  pieces.
+- Every puzzle is checked by a step-by-step solver that only uses
+  reasoning a player can do (forced links at corners and dead ends, cells
+  a path can no longer reach, and on Hard, the one cell or link a path must
+  go through). A puzzle is only kept if that solver finishes it, so it has
+  exactly one solution and never needs guessing.
+- The Daily Challenge puzzle changes once with this update, since puzzles
+  are built differently.
+
+### Added
+- A "Generating puzzle…" bar appears if building a puzzle ever takes a
+  while on the e-reader.
+
+### Fixed
+- The game is won whenever every cell is covered and each pair is joined
+  by one unbroken path, even if it differs from the stored solution.
+- Numbers 7, 8, 13 and 14 (and every sixth pair after them) were black on
+  a black or dark-grey square, so they could not be read; they are now
+  white like 1 and 2.
+
 ## [1.5.3] - 2026-11-04
 
 ### Fixed

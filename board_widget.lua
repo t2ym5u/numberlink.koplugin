@@ -39,6 +39,13 @@ local function colorFor(c)
     return COLORS[((c-1) % #COLORS) + 1]
 end
 
+-- The first two shades are dark enough to need white text. The shades
+-- repeat from pair 7 on, so test the shade, not the pair number (pairs 7,
+-- 8, 13, 14... used to get black digits on black).
+local function isDark(c)
+    return ((c-1) % #COLORS) + 1 <= 2
+end
+
 local NumberlinkBoardWidget = GridWidgetBase:extend{
     board = nil,
 }
@@ -115,7 +122,7 @@ function NumberlinkBoardWidget:paintTo(bb, x, y)
                     local label = tostring(color_id)
                     local dm    = RenderText:sizeUtf8Text(0, cell, self.note_face,
                                                           label, true, false)
-                    local tcol  = (color_id <= 2) and C_TEXT_WITE or C_TEXT_DARK
+                    local tcol  = isDark(color_id) and C_TEXT_WITE or C_TEXT_DARK
                     RenderText:renderUtf8Text(bb,
                         mx - math.floor(dm.x / 2),
                         my + math.floor((dm.y_top - dm.y_bottom) / 2),
@@ -181,7 +188,7 @@ function NumberlinkBoardWidget:paintTo(bb, x, y)
 
                 -- Draw number
                 local text   = tostring(clue)
-                local is_dark = col_id <= 2
+                local is_dark = isDark(col_id)
                 local tc     = is_dark and C_TEXT_WITE or C_TEXT_DARK
                 local m      = RenderText:sizeUtf8Text(0, inner, self.number_face, text, true, false)
                 local base_y = celly + pad + math.floor((inner + m.y_top - m.y_bottom) / 2)
