@@ -7,189 +7,500 @@ local function lrequire_common(name)
     return package.loaded[key]
 end
 
+local bit        = require("bit")
 local UndoStack  = lrequire_common("undo_stack")
 local grid_utils = lrequire_common("grid_utils")
 
 local emptyGrid = grid_utils.emptyGrid
 local copyGrid  = grid_utils.copyGrid
-local shuffle   = grid_utils.shuffle
 
 local DEFAULT_N          = 5
 local DEFAULT_DIFFICULTY = "easy"
 
--- Number of colors per 100 cells
-local N_COLORS_PER_100 = { easy = 25, medium = 32, hard = 40 }
-
 local DIRS = { {-1,0}, {1,0}, {0,-1}, {0,1} }
 
--- ---------------------------------------------------------------------------
--- Generator: serpentine Hamiltonian path split into N color paths
--- ---------------------------------------------------------------------------
+-- What each level asks for (1.6.0). Before, the only knob was the number
+-- of colours, and it ran the wrong way: Hard had the most pairs, so most
+-- of them were two numbers side by side (about 60%) and the puzzle all but
+-- solved itself, while Easy had the fewest. Every solution was also the
+-- same back-and-forth snake cut into pieces.
+--   colours  how many pairs (fewer pairs = longer paths = harder)
+--   tier     the hardest reasoning the solution may need (see logicSolve)
+-- Easy: many short paths, tier 1. Medium: fewer, longer paths, tier 1.
+-- Hard: the fewest, longest paths, and tier 2 is allowed.
+local LEVEL_COLOURS = {
+    --          easy        medium      hard
+    [5]  = { { 6, 7 },   { 5, 5 },   { 3, 4 } },
+    [7]  = { { 10, 12 }, { 8, 9 },   { 5, 7 } },
+    [9]  = { { 16, 18 }, { 13, 15 }, { 8, 12 } },
+    [10] = { { 19, 22 }, { 16, 18 }, { 10, 15 } },
+}
+local LEVEL_INDEX = { easy = 1, medium = 2, hard = 3 }
+local LEVEL_TIER  = { 1, 1, 2 }
+-- How much reasoning the solution needs (logicSolve's work score), as a
+-- share of the cells: Easy at most, Medium and Hard at least.
+local LEVEL_WORK  = { { 0, 0.20 }, { 0.14, math.huge }, { 0.22, math.huge } }
 
-local function makeSerpentine(n, start_corner, horizontal)
-    -- start_corner: 1=TL, 2=TR, 3=BL, 4=BR
-    -- horizontal: sweep rows first (true) or columns first (false)
-    local path = {}
-    if horizontal then
-        local row_start = (start_corner == 3 or start_corner == 4) and n or 1
-        local row_end   = (start_corner == 3 or start_corner == 4) and 1 or n
-        local row_step  = (row_start <= row_end) and 1 or -1
-        local even_rev  = (start_corner == 2 or start_corner == 4)
-        local i = 0
-        local r = row_start
-        while (row_step > 0 and r <= row_end) or (row_step < 0 and r >= row_end) do
-            local rev = (i % 2 == 0) ~= even_rev  -- XOR for alternating + corner flip
-            -- Actually just alternate: even rows go forward, odd rows go backward
-            -- (adjusted for start_corner)
-            local fwd = (i % 2 == 0)
-            if even_rev then fwd = not fwd end
-            if fwd then
-                for c = 1, n do path[#path+1] = {r, c} end
-            else
-                for c = n, 1, -1 do path[#path+1] = {r, c} end
-            end
-            r = r + row_step
-            i = i + 1
-        end
+local function levelFor(n, difficulty)
+    local li = LEVEL_INDEX[difficulty] or 1
+    local row = LEVEL_COLOURS[n]
+    local w
+    if row then
+        w = row[li]
     else
-        local col_start = (start_corner == 2 or start_corner == 4) and n or 1
-        local col_end   = (start_corner == 2 or start_corner == 4) and 1 or n
-        local col_step  = (col_start <= col_end) and 1 or -1
-        local even_rev  = (start_corner == 3 or start_corner == 4)
-        local i = 0
-        local c = col_start
-        while (col_step > 0 and c <= col_end) or (col_step < 0 and c >= col_end) do
-            local fwd = (i % 2 == 0)
-            if even_rev then fwd = not fwd end
-            if fwd then
-                for r = 1, n do path[#path+1] = {r, c} end
-            else
-                for r = n, 1, -1 do path[#path+1] = {r, c} end
-            end
-            c = c + col_step
-            i = i + 1
-        end
+        -- Any other size: the same colours-per-cell ratios.
+        local N = n * n
+        local f = ({ { 0.19, 0.22 }, { 0.15, 0.18 }, { 0.10, 0.145 } })[li]
+        w = { math.min(30, math.max(2, math.floor(N * f[1] + 0.5))),
+              math.min(30, math.max(2, math.floor(N * f[2] + 0.5))) }
     end
-    return path
+    local N, wk = n * n, LEVEL_WORK[li]
+    return { min_colours = w[1], max_colours = w[2], tier = LEVEL_TIER[li],
+             min_work = math.floor(N * wk[1] + 0.5), max_work = math.floor(N * wk[2] + 0.5) }
 end
 
--- Segment lengths for slicing the serpentine path into n_colors pieces.
--- The straightforward floor(total/n_colors) + remainder split is fully
--- DETERMINISTIC given n and n_colors (only 8 corner/orientation combos
--- exist at all) -- retrying generation can never explore anything new
--- without also varying the split itself. Reserve a 2-cell minimum per
--- color (a path needs at least its own two endpoints) and scatter the
--- remaining cells randomly across colors.
-local function randomSegLengths(total, n_colors)
-    local lengths = {}
-    for i = 1, n_colors do lengths[i] = 2 end
-    local remaining = total - 2 * n_colors
-    if remaining < 0 then
-        -- n_colors too large for the 2-cell minimum -- fall back to the
-        -- uniform split (matches the original, pre-jitter behavior).
-        local seg_base = math.floor(total / n_colors)
-        local seg_rem  = total - seg_base * n_colors
-        for i = 1, n_colors do
-            lengths[i] = seg_base + (i > n_colors - seg_rem and 1 or 0)
-        end
-        return lengths
-    end
-    for _ = 1, remaining do
-        local i = math.random(1, n_colors)
-        lengths[i] = lengths[i] + 1
-    end
-    return lengths
-end
-
-local function generateNumberlink(n, n_colors, seg_lengths)
-    -- Build a clean serpentine path
-    local corner = math.random(1, 4)
-    local horiz  = (math.random() > 0.5)
-    local path   = makeSerpentine(n, corner, horiz)
-
-    -- Ensure path covers all n*n cells
-    if #path ~= n*n then
-        -- Fallback: standard top-left serpentine
-        path = {}
-        for r = 1, n do
-            if r % 2 == 1 then
-                for c = 1, n do path[#path+1] = {r, c} end
-            else
-                for c = n, 1, -1 do path[#path+1] = {r, c} end
-            end
+-- Neighbour cells (flat indices) and the matching edge ids. Edge e < N is
+-- the one between cell e and the cell to its right, edge N + e the one
+-- between cell e and the cell below.
+local function gridLinks(n)
+    local N = n * n
+    local nbr, nedge = {}, {}
+    for r = 1, n do
+        for c = 1, n do
+            local i, l, e = (r - 1) * n + c, {}, {}
+            if r > 1 then l[#l + 1] = i - n; e[#e + 1] = N + i - n end
+            if r < n then l[#l + 1] = i + n; e[#e + 1] = N + i end
+            if c > 1 then l[#l + 1] = i - 1; e[#e + 1] = i - 1 end
+            if c < n then l[#l + 1] = i + 1; e[#e + 1] = i end
+            nbr[i], nedge[i] = l, e
         end
     end
-
-    local lengths = seg_lengths or randomSegLengths(n*n, n_colors)
-
-    local clues    = emptyGrid(n, n, 0)
-    local solution = emptyGrid(n, n, 0)
-
-    local idx = 1
-    for color = 1, n_colors do
-        local seg_len = lengths[color]
-        local start_i = idx
-        local end_i   = idx + seg_len - 1
-        idx = end_i + 1
-
-        for i = start_i, end_i do
-            if path[i] then
-                local r, c = path[i][1], path[i][2]
-                solution[r][c] = color
-            end
-        end
-
-        -- Mark endpoints as clues
-        if path[start_i] and path[end_i] then
-            local r1, c1 = path[start_i][1], path[start_i][2]
-            local r2, c2 = path[end_i][1],   path[end_i][2]
-            clues[r1][c1] = color
-            clues[r2][c2] = color
-        end
-    end
-
-    return clues, solution
+    return nbr, nedge
 end
 
 -- ---------------------------------------------------------------------------
--- Uniqueness counter. isSolved() is a LITERAL full-grid comparison to
--- self.solution (every cell must match exactly) -- so uniqueness means:
--- given only the clue endpoint pairs (2 per color), is there only one way
--- to partition the WHOLE grid into n_colors simple paths (each a
--- Hamiltonian path between its own two given endpoints over exactly its
--- assigned cells), jointly covering every cell? Note this does NOT require
--- each color's induced grid-adjacency subgraph to have degree <=2 (that
--- would be a stricter, wrong condition) -- "chords" (extra same-color
--- adjacencies beyond the intended path) don't prevent a Hamiltonian path
--- from existing, and the tap-to-extend interaction only ever needs SOME
--- valid path to exist, not a chordless one.
+-- Generator: a random partition of the grid into paths.
 --
--- Grows each color's path as an actual ordered path via DFS (from
--- endpoint1 to endpoint2, one adjacent unclaimed cell at a time), recursing
--- into the next color on every completed path; succeeds only once every
--- color is done AND every cell ends up claimed. Two prunes make this
--- tractable at all: colors are processed in ascending endpoint-distance
--- order (MRV -- the tightest-constrained path first), and after each step
--- a cheap BFS reachability check confirms every remaining color's endpoint
--- pair (and the current path's own target) is still connectable through
--- unclaimed cells, abandoning the branch immediately otherwise (mirrors
--- bridges' forward-checking fix elsewhere in this audit). Even so, this is
--- the least tractable solver of the whole human-solvability audit: only
--- n=5 (the smallest, default size) is verifiable within a practical node
--- budget -- see NumberlinkBoard:generate()'s comment for the accepted
--- larger-size limitation.
+-- Every cell starts as its own one-cell path; the ends of two paths that
+-- touch are then joined, one pair at a time, until `target` paths are left
+-- or no join is possible. A join is refused when the two paths would also
+-- touch anywhere else ("tight" paths, no path runs alongside itself): such
+-- a path could take a shortcut, and those puzzles were rarely solvable by
+-- reasoning. Cells still alone are joined first, the one with the fewest
+-- options first, so none is ever left stranded. Returns the paths as lists
+-- of flat cells (each at least two cells long).
 -- ---------------------------------------------------------------------------
+local function randomPartition(n, target, nbr)
+    local N = n * n
+    local random = math.random
+    local pid, paths = {}, {}
+    -- cells still alone, in a list with their positions (swap-remove)
+    local single, spos = {}, {}
+    for i = 1, N do
+        pid[i] = i; paths[i] = { i }
+        single[i] = i; spos[i] = i
+    end
+    local nsingle = N
+    local function unsingle(x)
+        local p = spos[x]
+        local last = single[nsingle]
+        single[p] = last; spos[last] = p
+        single[nsingle] = nil; spos[x] = nil
+        nsingle = nsingle - 1
+    end
+    local count = N
+    local function isEnd(i)
+        local p = paths[pid[i]]
+        return p[1] == i or p[#p] == i
+    end
+    local function canJoin(i, j)
+        if pid[i] == pid[j] or not isEnd(i) or not isEnd(j) then return false end
+        local A, B = paths[pid[i]], paths[pid[j]]
+        if #A > #B then A, B, i, j = B, A, j, i end
+        local idB = pid[j]
+        for q = 1, #A do
+            local x = A[q]
+            local l = nbr[x]
+            for w = 1, #l do
+                local y = l[w]
+                if pid[y] == idB and not (x == i and y == j) then return false end
+            end
+        end
+        return true
+    end
+    local opts, urgent, nurgent = {}, {}, 0
+    local function options(s)
+        local m, l = 0, nbr[s]
+        for w = 1, #l do
+            if canJoin(s, l[w]) then m = m + 1; opts[m] = l[w] end
+        end
+        return m
+    end
+    local function join(i, j)
+        local A, B = paths[pid[i]], paths[pid[j]]
+        if #A == 1 then unsingle(i) end
+        if #B == 1 then unsingle(j) end
+        local out = {}
+        if A[#A] == i then
+            for q = 1, #A do out[q] = A[q] end
+        else
+            for q = #A, 1, -1 do out[#out + 1] = A[q] end
+        end
+        if B[1] == j then
+            for q = 1, #B do out[#out + 1] = B[q] end
+        else
+            for q = #B, 1, -1 do out[#out + 1] = B[q] end
+        end
+        local id = pid[i]
+        paths[pid[j]] = false
+        paths[id] = out
+        for q = 1, #out do pid[out[q]] = id end
+        count = count - 1
+        -- lone cells next to the new path may have lost options
+        if nsingle > 0 then
+            for q = 1, #out do
+                local l = nbr[out[q]]
+                for w = 1, #l do
+                    local y = l[w]
+                    if spos[y] and options(y) <= 1 then
+                        nurgent = nurgent + 1; urgent[nurgent] = y
+                    end
+                end
+            end
+        end
+    end
+    local stuck = 0
+    while count > target do
+        if nsingle > 0 then
+            local s
+            while nurgent > 0 and not s do
+                local y = urgent[nurgent]
+                urgent[nurgent] = nil; nurgent = nurgent - 1
+                if spos[y] then s = y end
+            end
+            s = s or single[random(nsingle)]
+            local m = options(s)
+            if m == 0 then return nil end
+            join(s, opts[random(m)])
+        else
+            local i = random(N)
+            local l = nbr[i]
+            local j = l[random(#l)]
+            if canJoin(i, j) then
+                join(i, j)
+                stuck = 0
+            else
+                stuck = stuck + 1
+                if stuck > 6 * N then break end
+            end
+        end
+    end
+    local out = {}
+    for i = 1, N do
+        local p = paths[i]
+        if p then
+            if #p < 2 then return nil end
+            out[#out + 1] = p
+        end
+    end
+    return out
+end
 
--- Same search, in the same order, as before 1.5.0; what changed is speed
--- only (several times faster on 9x9/10x10 Easy). Cells are flat indices
--- instead of {r, c} tables, and two extra prunes drop branches that could
--- never cover the whole grid, so they had no solution to count anyway:
---   * dead end: a free cell left with too few free neighbours to be part
---     of a path (two for a plain cell, one for a clue);
---   * stranded cell: once a path is complete, a free cell no remaining
---     path can reach.
--- Counts are unchanged -- cross-checked against the previous solver on
--- thousands of candidate layouts -- so the puzzles are the same per seed.
+-- ---------------------------------------------------------------------------
+-- Human-style solver, no trial and error.
+--
+-- It keeps, for every cell, the colours it can still be, and for every
+-- link between two neighbouring cells whether a path uses it (on, off or
+-- not known yet). Tier 1 is what a player sees at a glance:
+--   * a numbered cell has exactly one link, any other cell exactly two:
+--     when only that many links are still possible they are all on, and
+--     once a cell has them all, its other links are off (corners, edges
+--     and dead ends);
+--   * linked cells have the same colour; two cells that can no longer
+--     share a colour are not linked; a link that would close a loop is
+--     off;
+--   * a cell can only be colour c if it still has enough neighbours that
+--     can be c to pass the path through (dead-end pockets);
+--   * a cell can only be colour c if c's path can still reach it from its
+--     number (walled-off cells).
+-- Tier 2, only when tier 1 is stuck: a cell (or link) that every remaining
+-- route of a colour must cross belongs to that colour (bottlenecks).
+-- Every step is a plain consequence of the rules, so when the solver
+-- colours every cell the puzzle has exactly that one solution.
+--
+-- clue: flat array (0 or the colour of a number), k colours.
+-- Returns solved, stats { waves = tier-1 passes, t2 = tier-2 steps },
+-- and the flat colour array when solved.
+-- ---------------------------------------------------------------------------
+local function logicSolve(clue, n, k, max_tier, nbr, nedge)
+    local N = n * n
+    if not nbr then nbr, nedge = gridLinks(n) end
+    -- colour sets are bit masks (the levels use at most 22 colours)
+    if k > 30 then return false, { waves = 0, t2 = 0 } end
+    local band, bor, bnot, lshift = bit.band, bit.bor, bit.bnot, bit.lshift
+    local ALL = lshift(1, k) - 1
+    -- dom[i]: bit c-1 set while cell i can still be colour c
+    local dom, need = {}, {}
+    local ep1, ep2 = {}, {}
+    for i = 1, N do
+        local v = clue[i]
+        if v > 0 then
+            dom[i], need[i] = lshift(1, v - 1), 1
+            if ep1[v] then ep2[v] = i else ep1[v] = i end
+        else
+            dom[i], need[i] = ALL, 2
+        end
+    end
+    for c = 1, k do
+        if not (ep1[c] and ep2[c]) then return false, { waves = 0, t2 = 0 } end
+    end
+    -- es[e]: 0 unknown, 1 on, 2 off
+    local es = {}
+    for e = 1, 2 * N do es[e] = 0 end
+    local uf = {}
+    for i = 1, N do uf[i] = i end
+    local function find(x)
+        while uf[x] ~= x do uf[x] = uf[uf[x]]; x = uf[x] end
+        return x
+    end
+
+    local bad = false
+    local dirty, cdirty = {}, 0     -- cdirty: mask of colours to re-walk
+    for i = 1, N do dirty[i] = true end
+    cdirty = ALL
+    local any_dirty = true
+
+    local function markAround(i)
+        dirty[i] = true
+        local l = nbr[i]
+        for w = 1, #l do dirty[l[w]] = true end
+        any_dirty = true
+    end
+    -- keep only the colours in `mask` for cell i
+    local function restrict(i, mask)
+        local d = dom[i]
+        local nd = band(d, mask)
+        if nd ~= d then
+            dom[i] = nd
+            if nd == 0 then bad = true end
+            cdirty = bor(cdirty, band(d, bnot(nd)))
+            markAround(i)
+        end
+    end
+    local function setEdge(e, a, b, v)
+        local st = es[e]
+        if st == 0 then
+            es[e] = v
+            if v == 1 then
+                uf[find(a)] = find(b)
+            else
+                cdirty = bor(cdirty, band(dom[a], dom[b]))
+            end
+            markAround(a)
+            markAround(b)
+        elseif st ~= v then
+            bad = true
+        end
+    end
+
+    local function cellRules(i)
+        local l, le = nbr[i], nedge[i]
+        -- links: same colours across an on link; no link without a shared
+        -- colour, nor one that closes a loop
+        for w = 1, #l do
+            local j, e = l[w], le[w]
+            local st = es[e]
+            if st == 1 then
+                local m = band(dom[i], dom[j])
+                restrict(i, m)
+                restrict(j, m)
+            elseif st == 0 then
+                if band(dom[i], dom[j]) == 0 or find(i) == find(j) then setEdge(e, i, j, 2) end
+            end
+            if bad then return end
+        end
+        -- degree
+        local on, unk = 0, 0
+        for w = 1, #le do
+            local st = es[le[w]]
+            if st == 1 then on = on + 1 elseif st == 0 then unk = unk + 1 end
+        end
+        local nd = need[i]
+        if on > nd or on + unk < nd then bad = true; return end
+        if unk > 0 and (on == nd or on + unk == nd) then
+            local v = (on == nd) and 2 or 1
+            for w = 1, #le do
+                if es[le[w]] == 0 then setEdge(le[w], i, l[w], v) end
+            end
+            if bad then return end
+        end
+        -- dead-end pockets: colours fewer than `need` open neighbours can carry
+        local d = dom[i]
+        if band(d, d - 1) ~= 0 then
+            local m1, m2 = 0, 0
+            for w = 1, #l do
+                if es[le[w]] ~= 2 then
+                    local x = dom[l[w]]
+                    m2 = bor(m2, band(m1, x))
+                    m1 = bor(m1, x)
+                end
+            end
+            restrict(i, nd == 1 and m1 or m2)
+        end
+    end
+
+    local seen, queue, par, stamp = {}, {}, {}, 0
+    for i = 1, N do seen[i] = 0 end
+    -- Breadth-first walk of colour bit cb from a, not through cell `bc`
+    -- nor link `be`. Returns whether b was reached.
+    local function walk(cb, a, b, bc, be)
+        stamp = stamp + 1
+        seen[a] = stamp; queue[1] = a; par[a] = 0
+        local h, t = 1, 1
+        local found = false
+        while h <= t do
+            local x = queue[h]; h = h + 1
+            if x == b then found = true end
+            local l, le = nbr[x], nedge[x]
+            for w = 1, #l do
+                local y, e = l[w], le[w]
+                if seen[y] ~= stamp and y ~= bc and e ~= be and es[e] ~= 2
+                        and band(dom[y], cb) ~= 0 then
+                    seen[y] = stamp; par[y] = x
+                    t = t + 1; queue[t] = y
+                end
+            end
+        end
+        return found
+    end
+    local function edgeBetween(a, b)
+        local l = nbr[a]
+        for w = 1, #l do if l[w] == b then return nedge[a][w] end end
+    end
+
+    -- walled-off cells: colour c only where its path can still reach
+    local function reachRule(c)
+        local cb = lshift(1, c - 1)
+        if not walk(cb, ep1[c], ep2[c]) then bad = true; return end
+        local nb = bnot(cb)
+        for i = 1, N do
+            if seen[i] ~= stamp and band(dom[i], cb) ~= 0 then restrict(i, nb) end
+        end
+    end
+
+    -- tier 2: bottleneck cells and links of colour c. One depth-first
+    -- walk from one number (low-link numbering): on the walk's way to the
+    -- other number, a cell whose further part cannot get back above it
+    -- without it is a cell every route crosses; same for a link.
+    local disc, low, counter = {}, {}, 0
+    local cbit, cbmark = 0, 0
+    local function dfs(v, pe)
+        counter = counter + 1
+        disc[v], low[v] = counter, counter
+        seen[v] = cbmark
+        local l, le = nbr[v], nedge[v]
+        for w = 1, #l do
+            local y, e = l[w], le[w]
+            if e ~= pe and es[e] ~= 2 and band(dom[y], cbit) ~= 0 then
+                if seen[y] ~= cbmark then
+                    par[y] = v
+                    dfs(y, e)
+                    if low[y] < low[v] then low[v] = low[y] end
+                elseif disc[y] < low[v] then
+                    low[v] = disc[y]
+                end
+            end
+        end
+    end
+    local function bottleneck(c)
+        local cb = lshift(1, c - 1)
+        local a, b = ep1[c], ep2[c]
+        if find(a) == find(b) then return false end   -- already drawn
+        stamp = stamp + 1
+        cbit, cbmark, counter = cb, stamp, 0
+        par[a] = 0
+        dfs(a, nil)
+        if seen[b] ~= stamp then bad = true; return true end
+        local found = false
+        local y = b
+        while y ~= a do
+            local v = par[y]
+            if low[y] >= disc[v] then
+                if v ~= a and dom[v] ~= cb then
+                    restrict(v, cb)
+                    found = true
+                end
+                if low[y] > disc[v] then
+                    local e = edgeBetween(v, y)
+                    if es[e] == 0 then
+                        setEdge(e, v, y, 1)
+                        found = true
+                    end
+                end
+            end
+            y = v
+        end
+        return found
+    end
+
+    local stats = { waves = 0, t2 = 0 }
+    while true do
+        while any_dirty or cdirty ~= 0 do
+            any_dirty = false
+            stats.waves = stats.waves + 1
+            for i = 1, N do
+                if dirty[i] then
+                    dirty[i] = false
+                    cellRules(i)
+                    if bad then return false, stats end
+                end
+            end
+            local cd = cdirty
+            cdirty = 0
+            for c = 1, k do
+                if band(cd, lshift(1, c - 1)) ~= 0 then
+                    reachRule(c)
+                    if bad then return false, stats end
+                end
+            end
+        end
+        local open = false
+        for i = 1, N do
+            local d = dom[i]
+            if band(d, d - 1) ~= 0 then open = true; break end
+        end
+        if not open or max_tier < 2 then break end
+        local progress = false
+        for c = 1, k do
+            if bottleneck(c) then progress = true; break end
+        end
+        if bad then return false, stats end
+        if not progress then break end
+        stats.t2 = stats.t2 + 1
+    end
+    local owner = {}
+    for i = 1, N do
+        local d = dom[i]
+        if band(d, d - 1) ~= 0 then return false, stats end
+        for c = 1, k do
+            if d == lshift(1, c - 1) then owner[i] = c end
+        end
+    end
+    return true, stats, owner
+end
+
+-- ---------------------------------------------------------------------------
+-- Exhaustive solution counter (search, not reasoning). Since 1.6.0 the
+-- generator no longer needs it -- logicSolve finishing a puzzle proves it
+-- has one solution -- but the specs use it to cross-check the solver:
+-- every puzzle logicSolve finishes must count exactly 1 here.
+--
+-- Grows each colour's path from one number to the other, one free cell at
+-- a time, colours in ascending endpoint-distance order, pruning branches
+-- where a remaining pair can no longer connect, a free cell is left with
+-- too few free neighbours (dead end), or a free cell can no longer be
+-- reached by any remaining path (stranded cell).
+-- ---------------------------------------------------------------------------
 local function countSolutions(clues, n, k, limit, node_budget)
     local N = n * n
     local owner, clue = {}, {}
@@ -409,58 +720,107 @@ function NumberlinkBoard:new(opts)
     }, self)
 end
 
-function NumberlinkBoard:generate(difficulty)
+NumberlinkBoard._logicSolve      = logicSolve       -- for the specs
+NumberlinkBoard._levelFor        = levelFor
+NumberlinkBoard._randomPartition = randomPartition
+NumberlinkBoard._gridLinks       = gridLinks
+NumberlinkBoard.ATTEMPTS, NumberlinkBoard.RESCUE_ATTEMPTS = 60, 2000
+
+-- logicSolve's work score: tier-1 passes, a tier-2 step counting as four.
+local function workOf(stats) return stats.waves + 4 * stats.t2 end
+NumberlinkBoard._workOf = workOf
+
+-- Turns a list of paths into clue and solution grids. Colours are numbered
+-- in reading order of their first number.
+local function toGrids(n, paths)
+    local first = {}
+    for q, p in ipairs(paths) do first[q] = math.min(p[1], p[#p]) end
+    local order = {}
+    for q = 1, #paths do order[q] = q end
+    table.sort(order, function(x, y) return first[x] < first[y] end)
+    local clue, flat = {}, {}
+    for i = 1, n * n do clue[i] = 0 end
+    for colour, q in ipairs(order) do
+        local p = paths[q]
+        clue[p[1]], clue[p[#p]] = colour, colour
+        for _, i in ipairs(p) do flat[i] = colour end
+    end
+    return clue, flat
+end
+
+local function toGrid2D(n, flat)
+    local g = emptyGrid(n, n, 0)
+    for r = 1, n do
+        for c = 1, n do g[r][c] = flat[(r - 1) * n + c] end
+    end
+    return g
+end
+
+-- on_progress(fraction), optional: called after every candidate
+-- (screen.lua wires it to the shared "Generating puzzle..." bar).
+--
+-- Candidates are random partitions of the grid into the level's number of
+-- paths (randomPartition). One is kept only when logicSolve, limited to
+-- the level's tier, colours every cell (so it has exactly one solution and
+-- needs no trial and error) with a work score in the level's range; after
+-- ATTEMPTS candidates, the solved one closest to that range. All work is
+-- bounded by attempt counts, never the clock: a seed builds the same
+-- puzzle on every device (the Daily Challenge relies on that).
+function NumberlinkBoard:generate(difficulty, on_progress)
     self.difficulty  = difficulty or self.difficulty
     self.reveal      = false
     self.active_color = nil
     self.active_end  = nil
     self.undo:clear()
 
-    local n        = self.n
-    local cfg      = N_COLORS_PER_100[self.difficulty] or N_COLORS_PER_100.easy
-    local n_colors = math.max(2, math.floor(n*n * cfg / 100))
+    local n = self.n
+    local level = levelFor(n, self.difficulty)
+    local nbr, nedge = gridLinks(n)
+    local ATTEMPTS = NumberlinkBoard.ATTEMPTS
 
-    self.n_colors = n_colors
-
-    -- Verifying uniqueness here means searching every way to jointly
-    -- partition the WHOLE grid into n_colors Hamiltonian paths -- by far
-    -- the least tractable solver in this fleet's whole solvability audit
-    -- (multiple simultaneous interacting paths, not one shape). At the
-    -- ORIGINAL color density (8/12/16 colors per 100 cells) this was a
-    -- structural dead end, not a retry-budget problem: even 400 fresh
-    -- attempts at n=5 (24000+ underlying candidates via the 60-attempt
-    -- inner loop) never found a single genuinely unique layout at any of
-    -- the 3 real difficulties -- confirmed the SAME serpentine-slice
-    -- construction is fine, it's that 2-4 colors on a 25-cell grid leaves
-    -- far too much room to shift a segment boundary by a cell or two and
-    -- still connect the same two endpoints. Measured density needed for
-    -- real uniqueness: per-attempt success only becomes reliable (>90%)
-    -- around a 30%+ colors-per-cell ratio, roughly double the original
-    -- density -- fixed by raising N_COLORS_PER_100 accordingly. At that
-    -- density, more (shorter) colors also makes verification itself much
-    -- cheaper (worst case a few ms, not the multi-second stalls the old
-    -- density's few-long-paths shape caused), so every size is verified,
-    -- not just n=5.
-    local node_budget = 300000
-    local clues, solution
-    local best_clues, best_solution
-    for _ = 1, 60 do
-        if clues then break end
-        local seg_lengths = randomSegLengths(n * n, n_colors)
-        local cand_clues, cand_solution = generateNumberlink(n, n_colors, seg_lengths)
-        if not best_clues then
-            best_clues, best_solution = cand_clues, cand_solution
+    local function try(lv, check_work)
+        local paths = randomPartition(n, lv.min_colours, nbr)
+        if not paths or #paths < lv.min_colours or #paths > lv.max_colours then return nil end
+        local clue, flat = toGrids(n, paths)
+        local ok, stats = logicSolve(clue, n, #paths, lv.tier, nbr, nedge)
+        if not ok then return nil end
+        local w = workOf(stats)
+        local off = 0
+        if check_work then
+            off = w < lv.min_work and lv.min_work - w or (w > lv.max_work and w - lv.max_work or 0)
         end
-        local solutions, exhausted = countSolutions(cand_clues, n, n_colors, 2, node_budget)
-        if solutions == 1 and not exhausted then
-            clues, solution = cand_clues, cand_solution
-        end
+        return { clue = clue, flat = flat, k = #paths, stats = stats, off = off }
     end
-    if not clues then clues, solution = best_clues, best_solution end
-    self.clues, self.solution = clues, solution
+
+    local best, attempts = nil, 0
+    for _ = 1, ATTEMPTS do
+        attempts = attempts + 1
+        local cand = try(level, true)
+        if cand and (not best or cand.off < best.off) then best = cand end
+        if on_progress then on_progress(attempts / ATTEMPTS) end
+        if best and best.off == 0 then break end
+    end
+    local rescued = false
+    if not best then
+        -- Never seen in the specs' seeds: the Easy colour range, any work.
+        rescued = true
+        local easy = levelFor(n, "easy")
+        for _ = 1, NumberlinkBoard.RESCUE_ATTEMPTS do
+            attempts = attempts + 1
+            best = try(easy, false)
+            if best then break end
+        end
+        assert(best, "numberlink: no puzzle found")
+    end
+
+    self.n_colors = best.k
+    self.clues    = toGrid2D(n, best.clue)
+    self.solution = toGrid2D(n, best.flat)
+    self.gen_info = { attempts = attempts, work = workOf(best.stats), waves = best.stats.waves,
+                      t2 = best.stats.t2, in_range = best.off == 0, rescued = rescued }
     self.paths      = emptyGrid(n, n, 0)
     self.path_cells = {}
-    for c = 1, n_colors do self.path_cells[c] = {} end
+    for c = 1, best.k do self.path_cells[c] = {} end
     self.wrong_marks = emptyGrid(n, n, false)
 end
 
@@ -754,13 +1114,87 @@ function NumberlinkBoard:checkProgress()
     end
 end
 
+-- Solved when the paths keep the rules, whatever the stored solution says
+-- (1.6.0; before, the grid had to match the solution cell for cell): every
+-- cell covered, and each colour's cells form one unbroken path from its
+-- number to its other number.
+function NumberlinkBoard:_colourIsLinked(color)
+    local n = self.n
+    local a, b = self:getEndpoints(color)
+    if not (a and b) then return false end
+    local cells = 0
+    for r = 1, n do
+        for c = 1, n do
+            if self.paths[r][c] == color then cells = cells + 1 end
+        end
+    end
+    -- The drawn route, in walking order.
+    local pc = self.path_cells[color]
+    if pc and #pc == cells and cells >= 2 then
+        local head, tail = pc[1], pc[#pc]
+        local ok = ((head[1] == a[1] and head[2] == a[2] and tail[1] == b[1] and tail[2] == b[2])
+                 or (head[1] == b[1] and head[2] == b[2] and tail[1] == a[1] and tail[2] == a[2]))
+        local seen = {}
+        for i = 1, #pc do
+            if not ok then break end
+            local r, c = pc[i][1], pc[i][2]
+            local key = (r - 1) * n + c
+            if seen[key] or self.paths[r][c] ~= color then ok = false; break end
+            seen[key] = true
+            if i > 1 and math.abs(r - pc[i - 1][1]) + math.abs(c - pc[i - 1][2]) ~= 1 then
+                ok = false
+            end
+        end
+        if ok then return true end
+    end
+    -- No usable route list (e.g. the grid was filled directly): the
+    -- colour's cells must themselves form a simple path between its numbers.
+    local ends, from = 0, nil
+    for r = 1, n do
+        for c = 1, n do
+            if self.paths[r][c] == color then
+                local deg = 0
+                for _, d in ipairs(DIRS) do
+                    local nr, nc = r + d[1], c + d[2]
+                    if nr >= 1 and nr <= n and nc >= 1 and nc <= n and self.paths[nr][nc] == color then
+                        deg = deg + 1
+                    end
+                end
+                local is_end = (r == a[1] and c == a[2]) or (r == b[1] and c == b[2])
+                if deg ~= (is_end and 1 or 2) then return false end
+                if is_end then ends = ends + 1; from = from or { r, c } end
+            end
+        end
+    end
+    if ends ~= 2 then return false end
+    -- one piece, not a path plus separate loops
+    local seen, stack, count = { [(from[1] - 1) * n + from[2]] = true }, { from }, 1
+    while #stack > 0 do
+        local cur = table.remove(stack)
+        for _, d in ipairs(DIRS) do
+            local nr, nc = cur[1] + d[1], cur[2] + d[2]
+            local key = (nr - 1) * n + nc
+            if nr >= 1 and nr <= n and nc >= 1 and nc <= n and self.paths[nr][nc] == color
+                    and not seen[key] then
+                seen[key] = true
+                count = count + 1
+                stack[#stack + 1] = { nr, nc }
+            end
+        end
+    end
+    return count == cells
+end
+
 function NumberlinkBoard:isSolved()
     local n = self.n
     for r = 1, n do
         for c = 1, n do
-            if self.paths[r][c] == 0 then return false end
-            if self.paths[r][c] ~= self.solution[r][c] then return false end
+            local v = self.paths[r][c]
+            if v == 0 or v > self.n_colors then return false end
         end
+    end
+    for color = 1, self.n_colors do
+        if not self:_colourIsLinked(color) then return false end
     end
     return true
 end

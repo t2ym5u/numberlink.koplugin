@@ -21,7 +21,10 @@ by exactly one path.
 
 - **Multiple grid sizes** — 5×5, 7×7, 9×9, 10×10
 - **Hint** — two taps, working in a whole coloured path rather than cells
-- **Three difficulty levels** — Easy (fewer pairs), Medium, Hard
+- **Three difficulty levels** — Easy (many short paths), Medium, Hard
+  (fewest, longest paths, more reasoning)
+- **No guessing** — every puzzle has exactly one solution and is checked by
+  a solver that only uses reasoning a player can do
 - **Path drawing** — drag or tap-to-extend to draw paths
 - **Auto-clear** — drawing over an existing path segment removes it from that point
 - **Check** — highlights uncovered cells and crossing paths
