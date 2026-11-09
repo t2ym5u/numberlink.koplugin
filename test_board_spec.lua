@@ -336,12 +336,6 @@ describe("NumberlinkBoard", function()
         return count
     end
 
-    local function flatClues(b)
-        local clue = {}
-        for r = 1, b.n do for c = 1, b.n do clue[(r - 1) * b.n + c] = b.clues[r][c] end end
-        return clue
-    end
-
     -- Random candidate layouts (before any filter), as clue grids.
     local function candidate(n, target)
         local paths
@@ -373,94 +367,9 @@ describe("NumberlinkBoard", function()
     end)
 
     -- 1.6.0: random paths instead of the cut-up snake, a no-trial solver,
-    -- and levels that really differ (Hard used to be the easiest).
+    -- and levels that really differ (Hard used to be the easiest). The
+    -- level guarantees live in test_difficulty_spec.lua.
     describe("levels (1.6.0)", function()
-        local SIZES, LEVELS = { 5, 7, 9, 10 }, { "easy", "medium", "hard" }
-        local SEEDS = 10
-        local results = {}   -- results[n][level] = list of { k=, work=, two= }
-
-        setup(function()
-            for _, n in ipairs(SIZES) do
-                results[n] = {}
-                for _, d in ipairs(LEVELS) do
-                    local list = {}
-                    for seed = 1, SEEDS do
-                        math.randomseed(1000 * n + seed)
-                        local b = Board:new{ n = n }
-                        b:generate(d)
-                        local lv = Board._levelFor(n, d)
-                        local ok, st = Board._logicSolve(flatClues(b), n, b.n_colors, lv.tier)
-                        local cnt = {}
-                        for r = 1, n do for c = 1, n do
-                            local v = b.solution[r][c]; cnt[v] = (cnt[v] or 0) + 1
-                        end end
-                        local two = 0
-                        for col = 1, b.n_colors do if cnt[col] == 2 then two = two + 1 end end
-                        list[#list + 1] = { b = b, lv = lv, ok = ok, st = st, k = b.n_colors,
-                                            work = ok and Board._workOf(st), two = two }
-                    end
-                    results[n][d] = list
-                end
-            end
-        end)
-
-        it("every puzzle is finished by reasoning alone, within its level's tier", function()
-            for _, n in ipairs(SIZES) do
-                for _, d in ipairs(LEVELS) do
-                    for s, r in ipairs(results[n][d]) do
-                        local where = ("%dx%d %s seed %d"):format(n, n, d, s)
-                        assert.is_true(r.ok, where)
-                        assert.is_false(r.b.gen_info.rescued, where)
-                        assert.is_true(r.k >= r.lv.min_colours and r.k <= r.lv.max_colours, where)
-                        if d ~= "hard" then
-                            assert.are.equal(0, r.st.t2, where)
-                        end
-                        -- the solver's colours are the stored solution
-                        local _, _, owner = Board._logicSolve(flatClues(r.b), n, r.k, 2)
-                        for i = 1, n * n do
-                            local row, col = math.floor((i - 1) / n) + 1, (i - 1) % n + 1
-                            assert.are.equal(r.b.solution[row][col], owner[i], where)
-                        end
-                    end
-                end
-            end
-        end)
-
-        it("Easy, Medium and Hard differ: fewer, longer paths and more reasoning", function()
-            for _, n in ipairs(SIZES) do
-                local mk, mw = {}, {}
-                for li, d in ipairs(LEVELS) do
-                    local k, w = 0, 0
-                    for _, r in ipairs(results[n][d]) do k = k + r.k; w = w + r.work end
-                    mk[li], mw[li] = k / SEEDS, w / SEEDS
-                end
-                assert.is_true(mk[1] > mk[2] and mk[2] > mk[3], n .. ": colours")
-                assert.is_true(mw[1] < mw[2] and mw[2] < mw[3], n .. ": work")
-            end
-        end)
-
-        it("pairs of side-by-side numbers stay a minority", function()
-            for _, n in ipairs(SIZES) do
-                for _, d in ipairs(LEVELS) do
-                    local two, k = 0, 0
-                    for _, r in ipairs(results[n][d]) do two = two + r.two; k = k + r.k end
-                    assert.is_true(two / k < 0.35, ("%dx%d %s: %d/%d"):format(n, n, d, two, k))
-                end
-            end
-        end)
-
-        it("small puzzles have exactly one solution (exhaustive count)", function()
-            for _, n in ipairs({ 5, 7 }) do
-                for _, d in ipairs(LEVELS) do
-                    for s, r in ipairs(results[n][d]) do
-                        local sol, exhausted = Board._countSolutions(r.b.clues, n, r.k, 2, 1e7)
-                        assert.is_false(exhausted)
-                        assert.are.equal(1, sol, ("%dx%d %s seed %d"):format(n, n, d, s))
-                    end
-                end
-            end
-        end)
-
         it("whenever the solver finishes a candidate, it has one solution", function()
             local finished = 0
             for seed = 1, 150 do
@@ -475,32 +384,6 @@ describe("NumberlinkBoard", function()
                 end
             end
             assert.is_true(finished > 30)
-        end)
-
-        it("same seed, same puzzle (the Daily Challenge relies on it)", function()
-            for _, d in ipairs(LEVELS) do
-                local grids = {}
-                for t = 1, 2 do
-                    math.randomseed(77)
-                    local b = Board:new{ n = 9 }
-                    b:generate(d)
-                    grids[t] = b
-                end
-                for r = 1, 9 do for c = 1, 9 do
-                    assert.are.equal(grids[1].clues[r][c], grids[2].clues[r][c])
-                    assert.are.equal(grids[1].solution[r][c], grids[2].solution[r][c])
-                end end
-            end
-        end)
-
-        it("generates 10x10 Hard quickly", function()
-            local t0 = os.clock()
-            for seed = 1, 5 do
-                math.randomseed(seed)
-                Board:new{ n = 10 }:generate("hard")
-            end
-            -- ~5 ms each in LuaJIT; very generous for plain Lua.
-            assert.is_true(os.clock() - t0 < 10)
         end)
 
         it("reports progress while generating", function()
